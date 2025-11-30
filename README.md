@@ -1,40 +1,11 @@
 
 **Downloads required:**
 
-1.  **LibTorch (C++):** Download the **cxx11 ABI** version (Linux) or standard version (Windows) from [pytorch.org](https://pytorch.org/get-started/locally/). Unzip it so the `libtorch` folder is in your root.
-2.  **tch-rs C api wra[[er]]:** Download capi files from [tch-rs GitHub](https://www.google.com/search?q=https://github.com/LaurentMazare/tch-rs/tree/main/torch-sys/libtch) and put them in `capi/`.
+1.  **LibTorch (C++):** Download the **cxx11 ABI** version (Linux) or standard version (Windows) from [pytorch.org](https://pytorch.org/get-started/locally/). Unzip it to `libtorch` in the root of this project.
+2.  **tch-rs C api wra[[er]]:** Download capi files from [tch-rs](https://www.google.com/search?q=https://github.com/LaurentMazare/tch-rs/tree/main/torch-sys/libtch) and put them in `capi/`.
 
-### 3\. How to Build
 
-Open in a terminal `/otorch` directory.
-
-#### On Linux / macOS
-
-```bash
-mkdir build
-cd build
-# Point CMAKE_PREFIX_PATH to libtorch folder
-cmake -DCMAKE_PREFIX_PATH=../libtorch ..
-make
-```
-
-*Produces:* `libodin_torch.so` (or `.dylib`) in `build` folder.
-
-#### On Windows (PowerShell)
-
-*Note: Ensure Visual Studio (MSVC) is installed.*
-
-```powershell
-mkdir build
-cd build
-# Point to libtorch release mode
-cmake -DCMAKE_PREFIX_PATH="..\libtorch" -DCMAKE_BUILD_TYPE=Release ..
-cmake --build . --config Release
-```
-
-*Produces:* `odin_torch.dll` and `odin_torch.lib` in `build/Release`.
-
-### 4\. How to Use
+### 3\. How to Use
 
 ```odin
 package main

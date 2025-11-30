@@ -1,13 +1,14 @@
 package main
 
+import "core:c"
 import "core:fmt"
 
-// Define Opaque Handle
+// Define opaque ptr handle
 Tensor :: distinct rawptr
 
-// Import Wrapper Lib
+// Import wrapper lib
 // Ensure odin_torch.lib/.dll is accessible to the linker/runner
-foreign import lib "build/odin_torch.lib" 
+foreign import lib "libtorch/lib/libtorch.dylib" 
 
 foreign lib {
     // Bind procs from torch_api.h
