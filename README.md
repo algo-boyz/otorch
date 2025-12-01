@@ -5,7 +5,9 @@
 2.  **tch-rs C api wra[[er]]:** Download capi files from [tch-rs](https://www.google.com/search?q=https://github.com/LaurentMazare/tch-rs/tree/main/torch-sys/libtch) and put them in `capi/`.
 
 
-### 3. Compile C api wrapper
+### Compile C api wrapper 
+
+macos:
 
 ```bash
 clang++ -std=c++17 -dynamiclib \
@@ -17,6 +19,24 @@ clang++ -std=c++17 -dynamiclib \
     -o libtorch_wrapper.dylib \
     capi/torch_api.cpp capi/torch_api_gen.cpp capi/stubs.cpp \
     -Wl,-rpath,$(pwd)/libtorch/lib
+```
+
+linux:
+
+```bash
+clang++ -std=c++17 -shared -fPIC \
+    -I libtorch/include \
+    -I libtorch/include/torch/csrc/api/include \
+    -L libtorch/lib \
+    -ltorch -ltorch_cpu -lc10 \
+    -Wno-deprecated-declarations \
+    -o libtorch_wrapper.so \
+    capi/torch_api.cpp capi/torch_api_gen.cpp capi/stubs.cpp \
+    -Wl,-rpath,'$ORIGIN/libtorch/lib'
+```
+
+```bash
+ odin run capi/gen_bindings.odin -file > libtorch_wrapper_gen.odin
 ```
 
 ### 3\. How to Use
