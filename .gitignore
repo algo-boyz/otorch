@@ -1,8 +1,8 @@
 **/.DS_Store
 **/.vscode/
 **/build/
-**/capi/
 **/libtorch/
 **.so
 **.lib
 **.dll
+**.dylib
