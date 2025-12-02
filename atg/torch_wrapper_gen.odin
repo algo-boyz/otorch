@@ -2,7 +2,7 @@
 package atg
 
 import "core:c"
-foreign import lib "libtorch_wrapper.dylib"
+foreign import lib "torch_wrapper.dylib"
 
 foreign lib {
 	atg___and__ :: proc(out: ^Tensor, self: Tensor, other: Scalar) ---
