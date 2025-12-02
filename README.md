@@ -16,7 +16,7 @@ clang++ -std=c++17 -dynamiclib \
     -L libtorch/lib \
     -ltorch -ltorch_cpu -lc10 \
     -Wno-deprecated-declarations \
-    -o atg/libtorch_wrapper.dylib \
+    -o atg/torch_wrapper.dylib \
     ffi/torch_api.cpp ffi/torch_api_gen.cpp ffi/stubs.cpp \
     -Wl,-rpath,$(pwd)/libtorch/lib
 ```
@@ -30,7 +30,7 @@ clang++ -std=c++17 -shared -fPIC \
     -L libtorch/lib \
     -ltorch -ltorch_cpu -lc10 \
     -Wno-deprecated-declarations \
-    -o atg/libtorch_wrapper.so \
+    -o atg/torch_wrapper.so \
     ffi/torch_api.cpp ffi/torch_api_gen.cpp ffi/stubs.cpp \
     -Wl,-rpath,'$ORIGIN/libtorch/lib'
 ```

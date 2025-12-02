@@ -14,11 +14,12 @@ LoadCallback :: proc "c" (data: rawptr, name: cstring, t: Tensor)
 
 when ODIN_OS == .Windows {
     #panic("Windows is not supported yet")
-    foreign import lib "libtorch_wrapper.dll" // TODO: Contributions welcome!
+    // TODO: Contributions welcome!
+    // foreign import lib "torch_wrapper.dll"
 } else when ODIN_OS == .Darwin {
-    foreign import lib "libtorch_wrapper.dylib"
+    foreign import lib "torch_wrapper.dylib"
 } else {
-    foreign import lib "libtorch_wrapper.so"
+    foreign import lib "torch_wrapper.so"
 }
 
 foreign lib {
