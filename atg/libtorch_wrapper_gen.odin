@@ -1,45 +1,8 @@
 // AUTOMATICALLY GENERATED BINDINGS
-package otorch
+package atg
 
 import "core:c"
 foreign import lib "libtorch_wrapper.dylib"
-
-// Math Ops
-
-// Python equivalent: torch.add(self, other)
-add :: proc(self: Tensor, other: Tensor) -> Tensor {
-    out: Tensor
-   atg_add(&out, self, other)
-    return out
-}
-
-// Wrapper for atg_sub
-sub :: proc(self: Tensor, other: Tensor) -> Tensor {
-    out: Tensor
-    atg_sub(&out, self, other)
-    return out
-}
-
-// Wrapper for atg_mul (element-wise multiplication)
-mul :: proc(self: Tensor, other: Tensor) -> Tensor {
-    out: Tensor
-    atg_mul(&out, self, other)
-    return out
-}
-
-// Wrapper for Matrix Multiplication (mm)
-mm :: proc(self: Tensor, mat2: Tensor) -> Tensor {
-    out: Tensor
-    atg_mm(&out, self, mat2)
-    return out
-}
-
-// Wrapper for ReLU
-relu :: proc(self: Tensor) -> Tensor {
-    out: Tensor
-    atg_relu(&out, self)
-    return out
-}
 
 foreign lib {
 	atg___and__ :: proc(out: ^Tensor, self: Tensor, other: Scalar) ---

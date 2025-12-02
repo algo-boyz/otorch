@@ -2,7 +2,7 @@
 **Downloads required:**
 
 1.  **LibTorch (C++):** Download the **cxx11 ABI** version (Linux) or standard version (Windows) from [pytorch.org](https://pytorch.org/get-started/locally/). Unzip it to `libtorch` in the root of this project.
-2.  **tch-rs C api wra[[er]]:** Download capi files from [tch-rs](https://www.google.com/search?q=https://github.com/LaurentMazare/tch-rs/tree/main/torch-sys/libtch) and put them in `capi/`.
+2.  **tch-rs C api wrapper:** Download ffi files from [tch-rs](https://www.google.com/search?q=https://github.com/LaurentMazare/tch-rs/tree/main/torch-sys/libtch) and put them in `ffi/`.
 
 
 ### Compile C api wrapper 
@@ -16,8 +16,8 @@ clang++ -std=c++17 -dynamiclib \
     -L libtorch/lib \
     -ltorch -ltorch_cpu -lc10 \
     -Wno-deprecated-declarations \
-    -o libtorch_wrapper.dylib \
-    capi/torch_api.cpp capi/torch_api_gen.cpp capi/stubs.cpp \
+    -o atg/libtorch_wrapper.dylib \
+    ffi/torch_api.cpp ffi/torch_api_gen.cpp ffi/stubs.cpp \
     -Wl,-rpath,$(pwd)/libtorch/lib
 ```
 
@@ -30,14 +30,32 @@ clang++ -std=c++17 -shared -fPIC \
     -L libtorch/lib \
     -ltorch -ltorch_cpu -lc10 \
     -Wno-deprecated-declarations \
-    -o libtorch_wrapper.so \
-    capi/torch_api.cpp capi/torch_api_gen.cpp capi/stubs.cpp \
+    -o atg/libtorch_wrapper.so \
+    ffi/torch_api.cpp ffi/torch_api_gen.cpp ffi/stubs.cpp \
     -Wl,-rpath,'$ORIGIN/libtorch/lib'
 ```
 
-```bash
- odin run capi/gen_bindings.odin -file > libtorch_wrapper_gen.odin
-```
-
 ### 3\. How to Use
-Check demo folder 
+Check out the demo folder:
+
+```odin
+
+odin run demo
+
+Lib Torch via Odin
+
+Creating tensor of shape [2, 3] with data: [1, 2, 3, 4, 5, 6]
+Tensor created successfully!
+
+[LibTorch Output]:
+ 1  2  3
+ 4  5  6
+[ CPUFloatType{2,3} ]
+
+[Filling tensor with 99's]
+ 99  99  99
+ 99  99  99
+[ CPUFloatType{2,3} ]
+
+Done
+```
