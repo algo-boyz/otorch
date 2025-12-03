@@ -1,4 +1,8 @@
-# oTorch
+
+<h1 align="center">█▬▬𒄆 (◡̀_◡́)d𓌏nϟ 𒅒▬▬█</h1>
+<p align="center">
+    <img src="otorch.png" alt="oTorch" width="960">
+</p>
 
 Odin bindings for the C++ api of PyTorch. The goal is to provide a thin wrapper around the C++ PyTorch api (a.k.a. libtorch). Staying as close as possible to the original.
 
