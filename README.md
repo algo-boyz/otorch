@@ -53,7 +53,7 @@ Check out the demo folder:
 
 ```odin
 
-odin run demo
+$ odin run demo/basic
 
 Lib Torch via Odin
 
