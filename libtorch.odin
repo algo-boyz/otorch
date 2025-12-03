@@ -2,6 +2,7 @@ package otorch
 
 import "core:c"
 import "core:fmt"
+import "core:mem"
 import "core:strings"
 import t "atg"
 
@@ -117,6 +118,7 @@ pool_start :: proc() -> PoolState {
 }
 
 pool_end :: proc(state: PoolState) {
+
     // Clean up Tensors
     current_t_len := len(private_tensor_pool)
     for i := current_t_len - 1; i >= state.tensor_len; i -= 1 {
@@ -213,6 +215,142 @@ tensor_from_slice :: proc(data: []$T, dims: []i64,) -> Tensor {
     return track(out)
 }
 
+// Helper: Get the scalar type (float, int, etc)
+get_dtype :: proc(self: Tensor) -> ScalarType {
+    return ScalarType(t.at_scalar_type(self))
+}
+
+tensor_to_slice :: proc(self: Tensor, $T: typeid, allocator := context.allocator) -> []T {
+    n := numel(self)
+    if n == 0 {
+        return make([]T, 0, allocator)
+    }
+
+    // 1. Validation: Ensure T matches the Tensor's data type
+    // This prevents interpreting float bits as int bits, etc.
+    dtype := get_dtype(self)
+    when T == f32 { assert(dtype == .Float, "Type mismatch: Expected f32 tensor") }
+    else when T == f64 { assert(dtype == .Double, "Type mismatch: Expected f64 tensor") }
+    else when T == i32 { assert(dtype == .Int, "Type mismatch: Expected i32 tensor") }
+    else when T == i64 { assert(dtype == .Long, "Type mismatch: Expected i64 tensor") }
+    else when T == u8  { assert(dtype == .Byte, "Type mismatch: Expected u8 tensor") }
+    
+    // 2. Contiguity: Ensure memory is laid out sequentially (C-order)
+    // atg_contiguous returns a NEW tensor. 
+    contig := contiguous(self)
+    
+    // We must ensure this temporary tensor is freed before we return.
+    // Since we didn't 'track' it, we use at_free directly.
+    defer free_tensor(contig)
+
+    // 3. Pointers
+    src_ptr := data_ptr(contig)
+    
+    // 4. Allocation
+    res := make([]T, n, allocator)
+    
+    // 5. Fast Copy (Memcpy)
+    // raw_data(res) gives us the pointer to the start of the slice
+    byte_count := n * size_of(T)
+    mem.copy(raw_data(res), src_ptr, byte_count)
+    
+    return res
+}
+
+// tensor_to_slice :: proc(self: Tensor, allocator := context.allocator) -> []f32 {
+//     // Copies data from CPU tensor to Odin slice
+//     // Note: Assumes Float32 tensor.
+//     n := numel(self)
+//     // Ensure contiguous memory for copying
+//     contig := contiguous(self) 
+    
+//     // TODO: verify type/device
+//     data_ptr := data_ptr(contig)
+    
+//     res := make([]f32, n, allocator)
+//     mem_copy := raw_data(res)
+    
+//     // std C memcpy or simple loop if binding available. 
+//     // Assuming we can cast rawptr for this example:
+//     p := (^f32)(data_ptr)
+//     for i in 0..<n {
+//         res[i] = p[i]
+//     }
+    
+//     // We don't track 'contig' because we are about to lose scope inside this func, 
+//     // but better to manually free it to be safe if pool isn't active.
+//     free_tensor(contig)
+    
+//     return res
+// }
+
+numel :: proc(self: Tensor) -> int {
+    ndim := dim(self)
+    if ndim == 0 { 
+        return 1 // Scalars have 1 element
+    }
+    // Alloc shape array
+    s := make([]i64, ndim, context.temp_allocator)
+    t.at_shape(self, raw_data(s))
+
+    total := 1
+    for size in s {
+        total *= int(size)
+    }
+    return total
+}
+
+size_of_scalar :: proc(st: ScalarType) -> int {
+    switch st {
+    case .Byte, .Char:   return 1
+    case .Short, .Half:  return 2
+    case .Int, .Float:   return 4
+    case .Long, .Double: return 8
+    case: return 0
+    }
+}
+
+// otorch.to(f32, my_tensor)
+to :: proc($T: typeid, self: Tensor, non_blocking := false) -> Tensor {
+    when T == f32 {
+        return _cast_float(self, non_blocking)
+    } else when T == f64 {
+        return _cast_double(self, non_blocking)
+    } else when T == i32 || T == int { 
+        // NOTE: Torch 'Int' is strictly 32-bit.
+        return _cast_int(self, non_blocking)
+    } else when T == i64 {
+        return _cast_long(self, non_blocking)
+    } else when T == i16 {
+        return _cast_short(self, non_blocking)
+    } else when T == i8 {
+        return _cast_char(self, non_blocking)
+    } else when T == u8 {
+        return _cast_byte(self, non_blocking)
+    } else when T == f16 {
+        return _cast_half(self, non_blocking)
+    } else {
+        fmt.panicf("otorch.to: Unsupported type %v", typeid_of(T))
+    }
+}
+
+// Public API usage -> otorch.to_type(my_tensor, .Float)
+to_type :: proc(self: Tensor, type: ScalarType, non_blocking := false) -> Tensor {
+    switch type {
+    case .Byte:   return cast_byte(self, non_blocking)
+    case .Char:   return cast_char(self, non_blocking)
+    case .Short:  return cast_short(self, non_blocking)
+    case .Int:    return cast_int(self, non_blocking)
+    case .Long:   return cast_long(self, non_blocking)
+    case .Half:   return cast_half(self, non_blocking)
+    case .Float:  return cast_float(self, non_blocking)
+    case .Double: return cast_double(self, non_blocking)
+    case: 
+        fmt.println("Warning: Unknown ScalarType in cast")
+        return self
+    }
+}
+
 tensor_from_blob :: proc(
     data: rawptr,
     dims: []i64,
@@ -226,8 +364,8 @@ tensor_from_blob :: proc(
         c.size_t(len(dims)),
         raw_data(strides),
         c.size_t(len(strides)),
-        c.int(type),
-        c.int(device),
+        i32(type),
+        i32(device),
     )
     return track(out)
 }
@@ -254,7 +392,7 @@ tensor_from_slice_blob :: proc(
     // If your data is standard C-order contiguous, we can generate strides.
     // If you already have strides, use the raw 'tensor_from_blob' instead.
     
-    // Note: We need to allocate strides to pass them to C. 
+    // NOTE: We need to allocate strides to pass them to C. 
     // using context.temp_allocator ensures it is freed at end of frame/scope.
     strides := make([]i64, len(dims), context.temp_allocator)
     
@@ -337,7 +475,7 @@ shape :: proc(self: Tensor) -> []i64 {
     ndim := dim(self)
     if ndim == 0 { return nil }
     
-    // Allocate slice using current context (temp or heap)
+    // Alloc slice using context (temp or heap)
     s := make([]i64, ndim)
     t.at_shape(self, raw_data(s))
     return s
@@ -353,7 +491,7 @@ stride :: proc(self: Tensor) -> []i64 {
     return s
 }
 
-// AMP (AUTOMATIC MIXED PRECISION)
+// AMP AUTOMATIC MIXED PRECISION
 
 amp_non_finite_check_and_unscale :: proc(self: Tensor, found_inf: Tensor, inv_scale: Tensor) {
     t.at__amp_non_finite_check_and_unscale(
@@ -388,8 +526,8 @@ autocast_set_enabled :: proc(enabled: bool) -> bool {
 backward :: proc(self: Tensor, keep_graph := false, create_graph := false) {
     t.at_backward(
         self, 
-        c.int(keep_graph), 
-        c.int(create_graph),
+        i32(keep_graph), 
+        i32(create_graph),
     )
 }
 
@@ -398,10 +536,9 @@ requires_grad :: proc(self: Tensor) -> bool {
 }
 
 grad_set_enabled :: proc(enabled: bool) -> bool {
-    return t.at_grad_set_enabled(c.int(enabled)) != 0
+    return t.at_grad_set_enabled(i32(enabled)) != 0
 }
 
-// Complex backward run taking slices of tensors
 run_backward :: proc(
     tensors: []Tensor, 
     inputs:  []Tensor, 
@@ -409,22 +546,21 @@ run_backward :: proc(
     keep_graph := false, 
     create_graph := false
 ) {
-    // We cast the data pointer of the []Tensor slice to [^]t.Tensor
-    // This assumes Tensor is structurally identical to t.Tensor (e.g. distinct or alias)
+    // Cast data ptr of []Tensor slice to [^]t.Tensor
     t.at_run_backward(
-        cast([^]t.Tensor)raw_data(tensors), c.int(len(tensors)),
-        cast([^]t.Tensor)raw_data(inputs),  c.int(len(inputs)),
+        cast([^]t.Tensor)raw_data(tensors), i32(len(tensors)),
+        cast([^]t.Tensor)raw_data(inputs),  i32(len(inputs)),
         cast([^]t.Tensor)raw_data(outputs),
-        c.int(keep_graph),
-        c.int(create_graph),
+        i32(keep_graph),
+        i32(create_graph),
     )
 }
 
 // OPERATIONS & INDEXING
 
-// Returns a new tensor slice/view, must track
+// Returns a new tracked tensor
 get :: proc(self: Tensor, index: int) -> Tensor {
-    return track(t.at_get(self, c.int(index)))
+    return track(t.at_get(self, i32(index)))
 }
 
 fill_int64 :: proc(self: Tensor, value: i64) {
@@ -435,7 +571,7 @@ double_value_at :: proc(self: Tensor, indices: []i64) -> f64 {
     return t.at_double_value_at_indexes(
         self, 
         raw_data(indices), 
-        c.int(len(indices)),
+        i32(len(indices)),
     )
 }
 
@@ -443,15 +579,15 @@ int64_value_at :: proc(self: Tensor, indices: []i64) -> i64 {
     return t.at_int64_value_at_indexes(
         self, 
         raw_data(indices), 
-        c.int(len(indices)),
+        i32(len(indices)),
     )
 }
 
 set_double_value_at :: proc(self: Tensor, indices: []i32, value: f64) {
     t.at_set_double_value_at_indexes(
         self, 
-        cast([^]c.int)raw_data(indices), 
-        c.int(len(indices)), 
+        cast([^]i32)raw_data(indices), 
+        i32(len(indices)), 
         value,
     )
 }
@@ -459,10 +595,7 @@ set_double_value_at :: proc(self: Tensor, indices: []i32, value: f64) {
 // I/O & SERIALIZATION
 
 to_string :: proc(self: Tensor, line_size := 80) -> string {
-    c_str := t.at_to_string(self, c.int(line_size))
-    // Note: Implicitly we might need to free c_str if libtorch allocates it, 
-    // but usually string conversion copies to Odin string and lets GC/Allocator handle it.
-    // For now, simple cast:
+    c_str := t.at_to_string(self, i32(line_size))
     return string(c_str) 
 }
 
@@ -480,24 +613,19 @@ save_multi :: proc(tensors: []Tensor, names: []cstring, filename: string) {
     t.at_save_multi(
         cast([^]t.Tensor)raw_data(tensors), 
         raw_data(names), 
-        c.int(len(tensors)), 
+        i32(len(tensors)), 
         strings.clone_to_cstring(filename, context.temp_allocator),
     )
 }
 
 load_multi :: proc(tensors: []Tensor, names: []cstring, filename: string) {
     assert(len(tensors) == len(names))
-    // at_load_multi fills the existing tensors array? 
-    // Usually load_multi creates new tensors. 
-    // If it creates new tensors, we need to manually track them after the C call returns.
-    
     t.at_load_multi(
         cast([^]t.Tensor)raw_data(tensors), 
         raw_data(names), 
-        c.int(len(tensors)), 
+        i32(len(tensors)), 
         strings.clone_to_cstring(filename, context.temp_allocator),
     )
-    
     // Auto-track the loaded tensors
     for tensor in tensors {
         track(tensor)
@@ -523,7 +651,7 @@ save_image :: proc(self: Tensor, filename: string) -> bool {
 }
 
 resize_image :: proc(self: Tensor, w, h: int) -> Tensor {
-    return track(t.at_resize_image(self, c.int(w), c.int(h)))
+    return track(t.at_resize_image(self, i32(w), i32(h)))
 }
 
 // SCALARS
@@ -545,7 +673,6 @@ scalar_to_float :: proc(s: Scalar) -> f64 {
 }
 
 scalar_to_string :: proc(s: Scalar) -> string {
-    // Convert cstring to Odin string for easier usage
     c_str := t.ats_to_string(s)
     return string(c_str)
 }
@@ -651,178 +778,175 @@ user_enabled_cudnn :: proc() -> bool {
 }
 
 set_user_enabled_cudnn :: proc(b: bool) {
-    t.atc_set_user_enabled_cudnn(c.int(b))
+    t.atc_set_user_enabled_cudnn(i32(b))
 }
 
 set_benchmark_cudnn :: proc(b: bool) {
-    t.atc_set_benchmark_cudnn(c.int(b))
+    t.atc_set_benchmark_cudnn(i32(b))
 }
 
 // OPTIMIZERS
 
-ato_adam :: proc(lr, beta1, beta2, weight_decay, eps: f64, amsgrad: bool) -> Optimizer {
+o_adam :: proc(lr, beta1, beta2, weight_decay, eps: f64, amsgrad: bool) -> Optimizer {
     return track(t.ato_adam(lr, beta1, beta2, weight_decay, eps, amsgrad))
 }
 
-ato_adamw :: proc(lr, beta1, beta2, weight_decay, eps: f64, amsgrad: bool) -> Optimizer {
+o_adamw :: proc(lr, beta1, beta2, weight_decay, eps: f64, amsgrad: bool) -> Optimizer {
     return track(t.ato_adamw(lr, beta1, beta2, weight_decay, eps, amsgrad))
 }
 
-ato_rms_prop :: proc(lr, alpha, eps, weight_decay, momentum: f64, centered: bool) -> Optimizer {
+o_rms_prop :: proc(lr, alpha, eps, weight_decay, momentum: f64, centered: bool) -> Optimizer {
     return track(t.ato_rms_prop(
         lr, alpha, eps, weight_decay, momentum, 
-        c.int(centered), // Cast bool to c.int
+        i32(centered),
     ))
 }
 
-ato_sgd :: proc(lr, momentum, dampening, weight_decay: f64, nesterov: bool) -> Optimizer {
+o_sgd :: proc(lr, momentum, dampening, weight_decay: f64, nesterov: bool) -> Optimizer {
     return track(t.ato_sgd(
         lr, momentum, dampening, weight_decay, 
-        c.int(nesterov), // Cast bool to c.int
+        i32(nesterov),
     ))
 }
 
-ato_add_parameters :: proc(opt: Optimizer, tensor: Tensor, group: int) {
+o_add_parameters :: proc(opt: Optimizer, tensor: Tensor, group: int) {
     t.ato_add_parameters(opt, tensor, c.size_t(group))
 }
 
-ato_set_learning_rate :: proc(opt: Optimizer, lr: f64) {
+o_set_learning_rate :: proc(opt: Optimizer, lr: f64) {
     t.ato_set_learning_rate(opt, lr)
 }
 
-ato_set_momentum :: proc(opt: Optimizer, momentum: f64) {
+o_set_momentum :: proc(opt: Optimizer, momentum: f64) {
     t.ato_set_momentum(opt, momentum)
 }
 
-ato_set_learning_rate_group :: proc(opt: Optimizer, group: int, lr: f64) {
+o_set_learning_rate_group :: proc(opt: Optimizer, group: int, lr: f64) {
     t.ato_set_learning_rate_group(opt, c.size_t(group), lr)
 }
 
-ato_set_momentum_group :: proc(opt: Optimizer, group: int, momentum: f64) {
+o_set_momentum_group :: proc(opt: Optimizer, group: int, momentum: f64) {
     t.ato_set_momentum_group(opt, c.size_t(group), momentum)
 }
 
-ato_set_weight_decay :: proc(opt: Optimizer, weight_decay: f64) {
+o_set_weight_decay :: proc(opt: Optimizer, weight_decay: f64) {
     t.ato_set_weight_decay(opt, weight_decay)
 }
 
-ato_set_weight_decay_group :: proc(opt: Optimizer, group: int, weight_decay: f64) {
+o_set_weight_decay_group :: proc(opt: Optimizer, group: int, weight_decay: f64) {
     t.ato_set_weight_decay_group(opt, c.size_t(group), weight_decay)
 }
 
-ato_zero_grad :: proc(opt: Optimizer) {
+o_zero_grad :: proc(opt: Optimizer) {
     t.ato_zero_grad(opt)
 }
 
-ato_step :: proc(opt: Optimizer) {
+o_step :: proc(opt: Optimizer) {
     t.ato_step(opt)
 }
 
-ato_free :: proc(opt: Optimizer) {
+o_free :: proc(opt: Optimizer) {
     t.ato_free(opt)
 }
 
-// MODULES (TorchScript)
+// MODULES / TorchScript
 
-atm_load :: proc(filename: string) -> Module {
+m_load :: proc(filename: string) -> Module {
     c_filename := strings.clone_to_cstring(filename, context.temp_allocator)
     return track(t.atm_load(c_filename))
 }
 
-atm_load_on_device :: proc(filename: string, device: int) -> Module {
+m_load_on_device :: proc(filename: string, device: int) -> Module {
     c_filename := strings.clone_to_cstring(filename, context.temp_allocator)
-    return track(t.atm_load_on_device(c_filename, c.int(device)))
+    return track(t.atm_load_on_device(c_filename, i32(device)))
 }
 
-atm_load_str :: proc(data: string) -> Module {
+m_load_str :: proc(data: string) -> Module {
     c_data := strings.clone_to_cstring(data, context.temp_allocator)
     return track(t.atm_load_str(c_data, c.size_t(len(data))))
 }
 
-atm_load_str_on_device :: proc(data: string, device: int) -> Module {
+m_load_str_on_device :: proc(data: string, device: int) -> Module {
     c_data := strings.clone_to_cstring(data, context.temp_allocator)
-    return track(t.atm_load_str_on_device(c_data, c.size_t(len(data)), c.int(device)))
+    return track(t.atm_load_str_on_device(c_data, c.size_t(len(data)), i32(device)))
 }
 
-atm_forward :: proc(m: Module, tensors: []Tensor) -> Tensor {
-    // Pass raw data of slice and cast len to c.int
-    return track(t.atm_forward(m, raw_data(tensors), c.int(len(tensors))))
+m_forward :: proc(m: Module, tensors: []Tensor) -> Tensor {
+    // Pass raw data of slice and cast len to i32
+    return track(t.atm_forward(m, raw_data(tensors), i32(len(tensors))))
 }
 
-atm_forward_ivalues :: proc(m: Module, ivalues: []IValue) -> IValue {
+m_forward_ivalues :: proc(m: Module, ivalues: []IValue) -> IValue {
     // Renamed from atm_forward_ to be more clear in Odin
-    return track(t.atm_forward_(m, raw_data(ivalues), c.int(len(ivalues))))
+    return track(t.atm_forward_(m, raw_data(ivalues), i32(len(ivalues))))
 }
 
-atm_method :: proc(m: Module, method_name: string, tensors: []Tensor) -> Tensor {
+m_method :: proc(m: Module, method_name: string, tensors: []Tensor) -> Tensor {
     c_method := strings.clone_to_cstring(method_name, context.temp_allocator)
-    return track(t.atm_method(m, c_method, raw_data(tensors), c.int(len(tensors))))
+    return track(t.atm_method(m, c_method, raw_data(tensors), i32(len(tensors))))
 }
 
-atm_method_ivalues :: proc(m: Module, method_name: string, ivalues: []IValue) -> IValue {
+m_method_ivalues :: proc(m: Module, method_name: string, ivalues: []IValue) -> IValue {
     c_method := strings.clone_to_cstring(method_name, context.temp_allocator)
-    return track(t.atm_method_(m, c_method, raw_data(ivalues), c.int(len(ivalues))))
+    return track(t.atm_method_(m, c_method, raw_data(ivalues), i32(len(ivalues))))
 }
 
-atm_create_class :: proc(m: Module, clz_name: string, ivalues: []IValue) -> IValue {
+m_create_class :: proc(m: Module, clz_name: string, ivalues: []IValue) -> IValue {
     c_name := strings.clone_to_cstring(clz_name, context.temp_allocator)
-    return track(t.atm_create_class_(m, c_name, raw_data(ivalues), c.int(len(ivalues))))
+    return track(t.atm_create_class_(m, c_name, raw_data(ivalues), i32(len(ivalues))))
 }
 
-atm_eval :: proc(m: Module) {
+m_eval :: proc(m: Module) {
     t.atm_eval(m)
 }
 
-atm_train :: proc(m: Module) {
+m_train :: proc(m: Module) {
     t.atm_train(m)
 }
 
-atm_free :: proc(m: Module) {
+m_free :: proc(m: Module) {
     t.atm_free(m)
 }
 
-atm_to :: proc(m: Module, device: int, dtype: int, non_blocking: bool) {
-    t.atm_to(m, c.int(device), c.int(dtype), non_blocking)
+m_to :: proc(m: Module, device: int, dtype: int, non_blocking: bool) {
+    t.atm_to(m, i32(device), i32(dtype), non_blocking)
 }
 
-atm_save :: proc(m: Module, filename: string) {
+m_save :: proc(m: Module, filename: string) {
     c_filename := strings.clone_to_cstring(filename, context.temp_allocator)
     t.atm_save(m, c_filename)
 }
 
-atm_get_profiling_mode :: proc() -> int {
+m_get_profiling_mode :: proc() -> int {
     return int(t.atm_get_profiling_mode())
 }
 
-atm_set_profiling_mode :: proc(mode: int) {
-    t.atm_set_profiling_mode(c.int(mode))
+m_set_profiling_mode :: proc(mode: int) {
+    t.atm_set_profiling_mode(i32(mode))
 }
 
-atm_fuser_cuda_set_enabled :: proc(enabled: bool) {
+m_fuser_cuda_set_enabled :: proc(enabled: bool) {
     t.atm_fuser_cuda_set_enabled(enabled)
 }
 
-atm_fuser_cuda_is_enabled :: proc() -> bool {
+m_fuser_cuda_is_enabled :: proc() -> bool {
     return t.atm_fuser_cuda_is_enabled()
 }
 
-// Note: callback signature 'f' depends on 't.LoadCallback'. 
-// We generally pass rawptr through, but converting the callback itself is complex 
-// without knowing the C definition. We assume t.LoadCallback is compatible.
-atm_named_parameters :: proc(m: Module, data: rawptr, f: t.LoadCallback) {
+m_named_parameters :: proc(m: Module, data: rawptr, f: t.LoadCallback) {
     t.atm_named_parameters(m, data, f)
 }
 
 // TRACING
 
-atm_create_for_tracing :: proc(modl_name: string, inputs: []Tensor) -> Module {
+m_create_for_tracing :: proc(modl_name: string, inputs: []Tensor) -> Module {
     c_name := strings.clone_to_cstring(modl_name, context.temp_allocator)
-    return track(t.atm_create_for_tracing(c_name, raw_data(inputs), c.int(len(inputs))))
+    return track(t.atm_create_for_tracing(c_name, raw_data(inputs), i32(len(inputs))))
 }
 
-atm_end_tracing :: proc(m: Module, fn_name: string, outputs: []Tensor) {
+m_end_tracing :: proc(m: Module, fn_name: string, outputs: []Tensor) {
     c_name := strings.clone_to_cstring(fn_name, context.temp_allocator)
-    t.atm_end_tracing(m, c_name, raw_data(outputs), c.int(len(outputs)))
+    t.atm_end_tracing(m, c_name, raw_data(outputs), i32(len(outputs)))
 }
 
 // IValue Constructors (Creators)
@@ -832,7 +956,6 @@ i_none :: proc() -> IValue {
 }
 
 i_tensor :: proc(self: Tensor) -> IValue {
-    // We assume 'tensor' is already tracked/managed
     return track(t.ati_tensor(self))
 }
 
@@ -845,55 +968,50 @@ i_double :: proc(v: f64) -> IValue {
 }
 
 i_bool :: proc(v: bool) -> IValue {
-    val: c.int = 1 if v else 0
+    val: i32 = 1 if v else 0
     return track(t.ati_bool(val))
 }
 
 i_string :: proc(s: string) -> IValue {
-    // Use temp allocator for the C-string conversion. 
-    // Libtorch copies the string data, so we don't need this to persist.
     c_str := strings.clone_to_cstring(s, context.temp_allocator)
     return track(t.ati_string(c_str))
 }
 
 i_tuple :: proc(items: []IValue) -> IValue {
     if len(items) == 0 { return track(t.ati_tuple(nil, 0)) }
-    return track(t.ati_tuple(raw_data(items), c.int(len(items))))
+    return track(t.ati_tuple(raw_data(items), i32(len(items))))
 }
 
 i_generic_list :: proc(items: []IValue) -> IValue {
     if len(items) == 0 { return track(t.ati_generic_list(nil, 0)) }
-    return track(t.ati_generic_list(raw_data(items), c.int(len(items))))
+    return track(t.ati_generic_list(raw_data(items), i32(len(items))))
 }
 
 i_generic_dict :: proc(items: []IValue) -> IValue {
-    // Note: Dictionary inputs usually expect (Key, Value, Key, Value) or [(K,V)]
+    // NOTE: Dictionary inputs usually expect (Key, Value, Key, Value) or [(K,V)]
     if len(items) == 0 { return track(t.ati_generic_dict(nil, 0)) }
-    return track(t.ati_generic_dict(raw_data(items), c.int(len(items))))
+    return track(t.ati_generic_dict(raw_data(items), i32(len(items))))
 }
 
 i_int_list :: proc(v: []i64) -> IValue {
     if len(v) == 0 { return track(t.ati_int_list(nil, 0)) }
-    return track(t.ati_int_list(raw_data(v), c.int(len(v))))
+    return track(t.ati_int_list(raw_data(v), i32(len(v))))
 }
 
 i_double_list :: proc(v: []f64) -> IValue {
     if len(v) == 0 { return track(t.ati_double_list(nil, 0)) }
-    return track(t.ati_double_list(raw_data(v), c.int(len(v))))
+    return track(t.ati_double_list(raw_data(v), i32(len(v))))
 }
 
 i_bool_list :: proc(v: []bool) -> IValue {
-    // Torch expects a char* array for bools (1 byte per bool)
-    // We must convert Odin []bool to []u8 temporarily
     if len(v) == 0 { return track(t.ati_bool_list(nil, 0)) }
     
     temp_bytes := make([]u8, len(v), context.temp_allocator)
     for b, i in v {
         temp_bytes[i] = 1 if b else 0
     }
-    
-    // cast raw_data to cstring (char*) as required by the C api signature provided
-    return track(t.ati_bool_list(cstring(raw_data(temp_bytes)), c.int(len(v))))
+    // cast raw_data to cstring (char*)
+    return track(t.ati_bool_list(cstring(raw_data(temp_bytes)), i32(len(v))))
 }
 
 i_string_list :: proc(v: []string) -> IValue {
@@ -905,22 +1023,21 @@ i_string_list :: proc(v: []string) -> IValue {
         temp_cstrings[i] = strings.clone_to_cstring(s, context.temp_allocator)
     }
 
-    return track(t.ati_string_list(raw_data(temp_cstrings), c.int(len(v))))
+    return track(t.ati_string_list(raw_data(temp_cstrings), i32(len(v))))
 }
 
 i_tensor_list :: proc(v: []Tensor) -> IValue {
     if len(v) == 0 { return track(t.ati_tensor_list(nil, 0)) }
-    return track(t.ati_tensor_list(raw_data(v), c.int(len(v))))
+    return track(t.ati_tensor_list(raw_data(v), i32(len(v))))
 }
 
 i_device :: proc(d: int) -> IValue {
-    return track(t.ati_device(c.int(d)))
+    return track(t.ati_device(i32(d)))
 }
 
-// ACCESSORS (IValue -> Odin Types)
+// ACCESSORS IValue
 
 i_to_tensor :: proc(iv: IValue) -> Tensor {
-    // The resulting tensor is a new reference, so we TRACK it.
     return track(t.ati_to_tensor(iv))
 }
 
@@ -933,9 +1050,6 @@ i_to_double :: proc(iv: IValue) -> f64 {
 }
 
 i_to_string :: proc(iv: IValue) -> string {
-    // Convert CString to Odin String. 
-    // Note: If you want to keep this string around after the IValue dies, you might need strings.clone()
-    // For now, we return a string view of the C pointer.
     c_str := t.ati_to_string(iv)
     return string(c_str)
 }
@@ -952,10 +1066,10 @@ i_tuple_length :: proc(iv: IValue) -> int {
     return int(t.ati_tuple_length(iv))
 }
 
-// EXTRACTORS (IValue -> []Odin Types)
+// EXTRACTORS IValue
 
 // These functions automatically allocate the result slice using the
-// context.allocator (standard heap) unless specified otherwise.
+// context.allocator (standard heap) unless specified otherwise
 
 i_to_tuple :: proc(iv: IValue, allocator := context.allocator) -> []IValue {
     n := t.ati_tuple_length(iv)
@@ -964,7 +1078,6 @@ i_to_tuple :: proc(iv: IValue, allocator := context.allocator) -> []IValue {
     res := make([]IValue, n, allocator)
     t.ati_to_tuple(iv, raw_data(res), n)
     
-    // IMPORTANT: The extracted IValues are new references. Track them.
     for val in res { track(val) }
     return res
 }
@@ -1003,7 +1116,7 @@ i_to_bool_list :: proc(iv: IValue, allocator := context.allocator) -> []bool {
     if n <= 0 { return nil }
 
     // Torch returns char* (bytes), we want []bool
-    // 1. Get bytes
+    // Get bytes
     bytes := make([]u8, n, context.temp_allocator)
     t.ati_to_bool_list(iv, cstring(raw_data(bytes)), n)
 
@@ -1022,12 +1135,12 @@ i_to_tensor_list :: proc(iv: IValue, allocator := context.allocator) -> []Tensor
     res := make([]Tensor, n, allocator)
     t.ati_to_tensor_list(iv, raw_data(res), n)
 
-    // IMPORTANT: Track the extracted tensors
     for tensor in res { track(tensor) }
     return res
 }
 
-// OBJECT / METHODS
+// OBJECT METHODS
+
 i_tag :: proc(iv: IValue) -> int {
     return int(t.ati_tag(iv))
 }
@@ -1041,7 +1154,7 @@ i_object_method :: proc(iv: IValue, name: string, args: []IValue) -> IValue {
         args_ptr = raw_data(args)
     }
 
-    return track(t.ati_object_method_(iv, c_name, args_ptr, c.int(len(args))))
+    return track(t.ati_object_method_(iv, c_name, args_ptr, i32(len(args))))
 }
 
 i_object_getattr :: proc(iv: IValue, name: string) -> IValue {
@@ -1083,7 +1196,6 @@ bitwise_and_scalar_tensor :: proc(self: Scalar, other: Tensor) -> Tensor {
     return track(out)
 }
 
-// In-place
 bitwise_and_tensor_ :: proc(self: Tensor, other: Tensor) -> Tensor {
     out: Tensor
     t.atg_bitwise_and_tensor_(&out, self, other)
@@ -1107,7 +1219,6 @@ bitwise_not_tensor :: proc(self: Tensor) -> Tensor {
     return track(out)
 }
 
-// In-place
 bitwise_not_tensor_ :: proc(self: Tensor) -> Tensor {
     out: Tensor
     t.atg_bitwise_not_(&out, self)
@@ -1115,12 +1226,11 @@ bitwise_not_tensor_ :: proc(self: Tensor) -> Tensor {
 }
 
 // BITWISE OR (|)
-// Note: Extending the existing bitwise_or with the Scalar-first variant found in your list
 
 bitwise_or :: proc{
     bitwise_or_tensor, 
     bitwise_or_scalar, 
-    bitwise_or_scalar_tensor, // Added
+    bitwise_or_scalar_tensor,
 }
 
 bitwise_or_tensor :: proc(self: Tensor, other: Tensor) -> Tensor {
@@ -1135,7 +1245,6 @@ bitwise_or_scalar :: proc(self: Tensor, other: Scalar) -> Tensor {
     return track(out)
 }
 
-// (Existing bitwise_or_tensor/scalar assumed present from your code, adding the missing one)
 bitwise_or_scalar_tensor :: proc(self: Scalar, other: Tensor) -> Tensor {
     out: Tensor
     t.atg_bitwise_or_scalar_tensor(&out, self, other)
@@ -1172,7 +1281,7 @@ bitwise_xor_scalar_tensor :: proc(self: Scalar, other: Tensor) -> Tensor {
     return track(out)
 }
 
-// In-place
+
 bitwise_xor_tensor_ :: proc(self: Tensor, other: Tensor) -> Tensor {
     out: Tensor
     t.atg_bitwise_xor_tensor_(&out, self, other)
@@ -1215,7 +1324,7 @@ bitwise_left_shift_scalar_tensor :: proc(self: Scalar, other: Tensor) -> Tensor 
     return track(out)
 }
 
-// In-place
+
 bitwise_left_shift_tensor_ :: proc(self: Tensor, other: Tensor) -> Tensor {
     out: Tensor
     t.atg_bitwise_left_shift_(&out, self, other)
@@ -1258,7 +1367,7 @@ bitwise_right_shift_scalar_tensor :: proc(self: Scalar, other: Tensor) -> Tensor
     return track(out)
 }
 
-// In-place
+
 bitwise_right_shift_tensor_ :: proc(self: Tensor, other: Tensor) -> Tensor {
     out: Tensor
     t.atg_bitwise_right_shift_(&out, self, other)
@@ -1279,7 +1388,7 @@ adaptive_avg_pool2d :: proc(self: Tensor, output_size: []i64) -> Tensor {
         &out, 
         self, 
         raw_data(output_size), 
-        c.int(len(output_size)),
+        i32(len(output_size)),
     )
     return track(out)
 }
@@ -1290,14 +1399,14 @@ adaptive_avg_pool3d :: proc(self: Tensor, output_size: []i64) -> Tensor {
         &out, 
         self, 
         raw_data(output_size), 
-        c.int(len(output_size)),
+        i32(len(output_size)),
     )
     return track(out)
 }
 
 // BATCH DIMENSION UTILS
 
-// Often used internally to unsqueeze a specific dimension for batching
+// Often used internally to unsqueeze a specific dim for batching
 add_batch_dim :: proc(self: Tensor, batch_dim, level: i64) -> Tensor {
     out: Tensor
     t.atg__add_batch_dim(&out, self, batch_dim, level)
@@ -1321,8 +1430,6 @@ add_relu_scalar :: proc(self: Tensor, other: Scalar) -> Tensor {
     return track(out)
 }
 
-
-
 add_relu_tensor_ :: proc(self, other: Tensor) -> Tensor {
     out: Tensor
     t.atg__add_relu_(&out, self, other)
@@ -1341,14 +1448,14 @@ add_relu_scalar_ :: proc(self: Tensor, other: Scalar) -> Tensor {
 // Commonly used for fused Linear + Activation layers
 addmm_activation :: proc(self, mat1, mat2: Tensor, use_gelu: bool = false) -> Tensor {
     out: Tensor
-    use_gelu_int := c.int(1) if use_gelu else c.int(0)
+    use_gelu_int := i32(1) if use_gelu else i32(0)
     t.atg__addmm_activation(&out, self, mat1, mat2, use_gelu_int)
     return track(out)
 }
 
 // AMINMAX (Fused Min/Max)
 
-/* Note: _aminmax returns a tuple (min, max).
+/* NOTE: _aminmax returns a tuple (min, max).
    Because handling C-struct tuple returns can be fragile, we implement the 
    standard version by creating two tensors and calling the `_out` variant.
    This ensures memory safety and correct tracking in the pool.
@@ -1368,7 +1475,7 @@ aminmax_dim :: proc(self: Tensor, dim: i64, keepdim: bool = false) -> (min, max:
     min = new_tensor()
     max = new_tensor()
     
-    keep_int := c.int(1) if keepdim else c.int(0)
+    keep_int := i32(1) if keepdim else i32(0)
     
     dummy: Tensor
     t.atg__aminmax_dim_out(&dummy, min, max, self, dim, keep_int)
@@ -1376,104 +1483,63 @@ aminmax_dim :: proc(self: Tensor, dim: i64, keepdim: bool = false) -> (min, max:
     return min, max
 }
 
-// otorch.to(f32, my_tensor)
-to :: proc($T: typeid, self: Tensor, non_blocking := false) -> Tensor {
-    when T == f32 {
-        return _cast_float(self, non_blocking)
-    } else when T == f64 {
-        return _cast_double(self, non_blocking)
-    } else when T == i32 || T == int { 
-        // Note: Torch 'Int' is strictly 32-bit.
-        return _cast_int(self, non_blocking)
-    } else when T == i64 {
-        return _cast_long(self, non_blocking)
-    } else when T == i16 {
-        return _cast_short(self, non_blocking)
-    } else when T == i8 {
-        return _cast_char(self, non_blocking)
-    } else when T == u8 {
-        return _cast_byte(self, non_blocking)
-    } else when T == f16 {
-        return _cast_half(self, non_blocking)
-    } else {
-        fmt.panicf("otorch.to: Unsupported type %v", typeid_of(T))
-    }
-}
-
-// Public API: usage -> otorch.to_type(my_tensor, .Float)
-to_type :: proc(self: Tensor, type: ScalarType, non_blocking := false) -> Tensor {
-    switch type {
-    case .Byte:   return cast_byte(self, non_blocking)
-    case .Char:   return cast_char(self, non_blocking)
-    case .Short:  return cast_short(self, non_blocking)
-    case .Int:    return cast_int(self, non_blocking)
-    case .Long:   return cast_long(self, non_blocking)
-    case .Half:   return cast_half(self, non_blocking)
-    case .Float:  return cast_float(self, non_blocking)
-    case .Double: return cast_double(self, non_blocking)
-    case: 
-        fmt.println("Warning: Unknown ScalarType in cast")
-        return self // Or panic/return empty
-    }
-}
-
 @(private)
 cast_byte :: proc(self: Tensor, non_blocking := false) -> Tensor {
     out: Tensor
-    t.atg__cast_byte(&out, self, c.int(non_blocking))
+    t.atg__cast_byte(&out, self, i32(non_blocking))
     return track(out)
 }
 
 @(private)
 cast_float :: proc(self: Tensor, non_blocking := false) -> Tensor {
     out: Tensor
-    t.atg__cast_float(&out, self, c.int(non_blocking))
+    t.atg__cast_float(&out, self, i32(non_blocking))
     return track(out)
 }
 
 @(private)
 cast_double :: proc(self: Tensor, non_blocking := false) -> Tensor {
     out: Tensor
-    t.atg__cast_double(&out, self, c.int(non_blocking))
+    t.atg__cast_double(&out, self, i32(non_blocking))
     return track(out)
 }
 
 @(private)
 cast_int :: proc(self: Tensor, non_blocking := false) -> Tensor {
     out: Tensor
-    t.atg__cast_int(&out, self, c.int(non_blocking))
+    t.atg__cast_int(&out, self, i32(non_blocking))
     return track(out)
 }
 
 @(private)
 cast_long :: proc(self: Tensor, non_blocking := false) -> Tensor {
     out: Tensor
-    t.atg__cast_long(&out, self, c.int(non_blocking))
+    t.atg__cast_long(&out, self, i32(non_blocking))
     return track(out)
 }
 
 @(private)
 cast_short :: proc(self: Tensor, non_blocking := false) -> Tensor {
     out: Tensor
-    t.atg__cast_short(&out, self, c.int(non_blocking))
+    t.atg__cast_short(&out, self, i32(non_blocking))
     return track(out)
 }
 
 @(private)
 cast_char :: proc(self: Tensor, non_blocking := false) -> Tensor {
     out: Tensor
-    t.atg__cast_char(&out, self, c.int(non_blocking))
+    t.atg__cast_char(&out, self, i32(non_blocking))
     return track(out)
 }
 
 @(private)
 cast_half :: proc(self: Tensor, non_blocking := false) -> Tensor {
     out: Tensor
-    t.atg__cast_half(&out, self, c.int(non_blocking))
+    t.atg__cast_half(&out, self, i32(non_blocking))
     return track(out)
 }
 
-// AMP (Automatic Mixed Precision)
+// AMP Automatic Mixed Precision
 
 amp_update_scale :: proc(
     self: Tensor,
@@ -1506,8 +1572,8 @@ autocast_to_full_precision :: proc(self: Tensor, cuda_enabled: bool, cpu_enabled
     t.atg__autocast_to_full_precision(
         &out, 
         self, 
-        c.int(1) if cuda_enabled else c.int(0), 
-        c.int(1) if cpu_enabled else c.int(0),
+        i32(1) if cuda_enabled else i32(0), 
+        i32(1) if cpu_enabled else i32(0),
     )
     return track(out)
 }
@@ -1523,10 +1589,10 @@ autocast_to_reduced_precision :: proc(
     t.atg__autocast_to_reduced_precision(
         &out, 
         self, 
-        c.int(1) if cuda_enabled else c.int(0), 
-        c.int(1) if cpu_enabled else c.int(0),
-        c.int(cuda_dtype),
-        c.int(cpu_dtype),
+        i32(1) if cuda_enabled else i32(0), 
+        i32(1) if cpu_enabled else i32(0),
+        i32(cuda_dtype),
+        i32(cpu_dtype),
     )
     return track(out)
 }
@@ -1534,9 +1600,8 @@ autocast_to_reduced_precision :: proc(
 // ASSERTIONS
 
 assert_scalar :: proc(self: Scalar, msg: string) {
-    // We use the temp_allocator to create a null-terminated cstring for C interop
     c_msg := strings.clone_to_cstring(msg, context.temp_allocator)
-    t.atg__assert_scalar(self, c_msg, c.int(len(msg)))
+    t.atg__assert_scalar(self, c_msg, i32(len(msg)))
 }
 
 assert_tensor_metadata :: proc(
@@ -1544,15 +1609,15 @@ assert_tensor_metadata :: proc(
     size: []i64, 
     stride: []i64, 
     dtype: ScalarType,
-    device: i32, // Maps to c10::DeviceType ideally
-    layout: rawptr = nil, // Usually generic
+    device: i32, // TODO Map to c10::DeviceType
+    layout: rawptr = nil,
 ) {
     t.atg__assert_tensor_metadata(
         a, 
-        raw_data(size), c.int(len(size)),
-        raw_data(stride), c.int(len(stride)),
-        c.int(dtype),
-        c.int(device),
+        raw_data(size), i32(len(size)),
+        raw_data(stride), i32(len(stride)),
+        i32(dtype),
+        i32(device),
         layout,
     )
 }
@@ -1602,11 +1667,11 @@ conv_depthwise2d :: proc(
     out: Tensor
     t.atg__conv_depthwise2d(
         &out, self, weight, 
-        raw_data(kernel_size), c.int(len(kernel_size)),
+        raw_data(kernel_size), i32(len(kernel_size)),
         bias,
-        raw_data(stride), c.int(len(stride)),
-        raw_data(padding), c.int(len(padding)),
-        raw_data(dilation), c.int(len(dilation)),
+        raw_data(stride), i32(len(stride)),
+        raw_data(padding), i32(len(padding)),
+        raw_data(dilation), i32(len(dilation)),
     )
     return track(out)
 }
@@ -1614,7 +1679,7 @@ conv_depthwise2d :: proc(
 // CONVOLUTION (CUDNN)
 convolution :: proc(
     self, weight: Tensor, 
-    bias: Tensor = Tensor{}, // Optional usually, pass undefined Tensor if not needed
+    bias: Tensor = Tensor{}, // Optional, pass undefined Tensor if not needed
     stride: []i64, 
     padding: []i64, 
     dilation: []i64, 
@@ -1625,32 +1690,23 @@ convolution :: proc(
 ) -> Tensor {
     out: Tensor
     
-    // If bias is not defined, we might need to handle it based on specific atg behavior,
-    // usually passing an undefined tensor is fine if the C++ side expects it.
-    
-    // Check if we use the specialized variants or the generic cudnn_convolution
-    // Using generic generic cudnn_convolution here:
     t.atg_cudnn_convolution(
         &out,
         self,
         weight,
-        raw_data(padding), c.int(len(padding)),
-        raw_data(stride), c.int(len(stride)),
-        raw_data(dilation), c.int(len(dilation)),
+        raw_data(padding), i32(len(padding)),
+        raw_data(stride), i32(len(stride)),
+        raw_data(dilation), i32(len(dilation)),
         groups,
-        c.int(1) if benchmark else c.int(0),
-        c.int(1) if deterministic else c.int(0),
-        c.int(1) if allow_tf32 else c.int(0),
+        i32(1) if benchmark else i32(0),
+        i32(1) if deterministic else i32(0),
+        i32(1) if allow_tf32 else i32(0),
     )
-    
-    // Note: If bias is added, it often requires `atg_cudnn_convolution_add_relu` 
-    // or a separate `add`. This wrapper assumes raw cudnn conv behavior.
-    
     return track(out)
 }
 
 
-// Use "mode" string for padding (e.g. "zeros", "reflect")
+// TODO: use "mode" string enum for padding (e.g. "zeros", "reflect")
 convolution_mode :: proc(
     input, weight, bias: Tensor, 
     stride: []i64, 
@@ -1662,9 +1718,9 @@ convolution_mode :: proc(
     c_padding := strings.clone_to_cstring(padding, context.temp_allocator)
     t.atg__convolution_mode(
         &out, input, weight, bias,
-        raw_data(stride), c.int(len(stride)),
-        c_padding, c.int(len(padding)),
-        raw_data(dilation), c.int(len(dilation)),
+        raw_data(stride), i32(len(stride)),
+        c_padding, i32(len(padding)),
+        raw_data(dilation), i32(len(dilation)),
         groups,
     )
     return track(out)
@@ -1692,19 +1748,19 @@ cudnn_rnn :: proc(
     out: Tensor
     
     // weights is []Tensor, we need to pass pointer to data and length
-    // We also need the stride, usually 1 for contiguous arrays in Odin
+    // We also need the stride, usually 1 for contiguous arrays
     weight_stride := i64(1) 
 
     t.atg__cudnn_rnn(
         &out, input,
-        raw_data(weights), c.int(len(weights)), weight_stride,
+        raw_data(weights), i32(len(weights)), weight_stride,
         weight_buf, hx, cx,
         mode, hidden_size, proj_size, num_layers,
-        c.int(1) if batch_first else c.int(0),
+        i32(1) if batch_first else i32(0),
         dropout,
-        c.int(1) if train else c.int(0),
-        c.int(1) if bidirectional else c.int(0),
-        raw_data(batch_sizes), c.int(len(batch_sizes)),
+        i32(1) if train else i32(0),
+        i32(1) if bidirectional else i32(0),
+        raw_data(batch_sizes), i32(len(batch_sizes)),
         dropout_state,
     )
     return track(out)
@@ -1714,7 +1770,7 @@ cudnn_rnn :: proc(
 
 chunk_cat :: proc(tensors: []Tensor, dim: i64, num_chunks: i64) -> Tensor {
     out: Tensor
-    t.atg__chunk_cat(&out, raw_data(tensors), c.int(len(tensors)), dim, num_chunks)
+    t.atg__chunk_cat(&out, raw_data(tensors), i32(len(tensors)), dim, num_chunks)
     return track(out)
 }
 
@@ -1726,7 +1782,7 @@ coalesce :: proc(self: Tensor) -> Tensor {
 
 coalesced :: proc(self: Tensor, coalesced: bool) -> Tensor {
     out: Tensor
-    t.atg__coalesced(&out, self, c.int(1) if coalesced else c.int(0))
+    t.atg__coalesced(&out, self, i32(1) if coalesced else i32(0))
     return track(out)
 }
 
@@ -1756,13 +1812,13 @@ cdist_backward :: proc(grad, x1, x2: Tensor, p: f64, cdist: Tensor) -> Tensor {
 
 cholesky_solve_helper :: proc(self, A: Tensor, upper: bool) -> Tensor {
     out: Tensor
-    t.atg__cholesky_solve_helper(&out, self, A, c.int(1) if upper else c.int(0))
+    t.atg__cholesky_solve_helper(&out, self, A, i32(1) if upper else i32(0))
     return track(out)
 }
 
 convert_indices_from_coo_to_csr :: proc(self: Tensor, size: i64, out_int32: bool) -> Tensor {
     out: Tensor
-    t.atg__convert_indices_from_coo_to_csr(&out, self, size, c.int(1) if out_int32 else c.int(0))
+    t.atg__convert_indices_from_coo_to_csr(&out, self, size, i32(1) if out_int32 else i32(0))
     return track(out)
 }
 
@@ -1770,15 +1826,15 @@ convert_indices_from_csr_to_coo :: proc(crow_indices, col_indices: Tensor, out_i
     out: Tensor
     t.atg__convert_indices_from_csr_to_coo(
         &out, crow_indices, col_indices, 
-        c.int(1) if out_int32 else c.int(0),
-        c.int(1) if transpose else c.int(0),
+        i32(1) if out_int32 else i32(0),
+        i32(1) if transpose else i32(0),
     )
     return track(out)
 }
 
 copy_from :: proc(self, dst: Tensor, non_blocking: bool = false) -> Tensor {
     out: Tensor
-    t.atg__copy_from(&out, self, dst, c.int(1) if non_blocking else c.int(0))
+    t.atg__copy_from(&out, self, dst, i32(1) if non_blocking else i32(0))
     return track(out)
 }
 
@@ -1815,17 +1871,16 @@ embedding_bag :: proc(
         // Create an undefined tensor handle if passed empty
         psw = t.Tensor{} 
     }
-
     t.atg__embedding_bag(
         &out,
         weight,
         indices,
         offsets,
-        c.int(1) if scale_grad_by_freq else c.int(0),
+        i32(1) if scale_grad_by_freq else i32(0),
         mode,
-        c.int(1) if sparse else c.int(0),
+        i32(1) if sparse else i32(0),
         psw,
-        c.int(1) if include_last_offset else c.int(0),
+        i32(1) if include_last_offset else i32(0),
         padding_idx,
     )
     return track(out)
@@ -1849,22 +1904,21 @@ embedding_bag_padding_idx :: proc(
 ) -> Tensor {
     out: Tensor
     // If padding_idx is -1 (or user defined "null"), we pass nil to the rawptr arg
-    // otherwise we pass a dummy pointer to indicate the value is valid.
-    // The signature provided is: ... padding_idx_v: i64, padding_idx_null: rawptr
+    // otherwise we pass a dummy pointer to indicate the value is valid
     
     ptr_val: rawptr = nil
     if padding_idx != -1 {
-        ptr_val = rawptr(uintptr(1)) // Non-nil to indicate presence, if that's the binding convention
+        ptr_val = rawptr(uintptr(1)) // Non-nil to indicate presence
     }
 
     t.atg_embedding_bag_padding_idx(
         &out, 
         weight, indices, offsets, 
-        c.int(1) if scale_grad_by_freq else c.int(0),
+        i32(1) if scale_grad_by_freq else i32(0),
         mode,
-        c.int(1) if sparse else c.int(0),
+        i32(1) if sparse else i32(0),
         per_sample_weights,
-        c.int(1) if include_last_offset else c.int(0),
+        i32(1) if include_last_offset else i32(0),
         padding_idx,
         ptr_val,
     )
@@ -1880,38 +1934,20 @@ linalg_det :: proc(A: Tensor) -> Tensor {
 }
 
 // Returns the sign and natural logarithm of the absolute value of the determinant
-linalg_slogdet :: proc(A: Tensor) -> (sign, logabsdet: Tensor) {
-    // Note: The specific function `atg__linalg_slogdet` usually returns a tuple.
-    // However, since `atg` usually maps tuples to struct returns or specific out-params,
-    // and `atg__linalg_slogdet` in your list takes `out: ^Tensor`, it might imply 
-    // it returns a single Tensor (unlikely) or the binding generation simplifies a tuple.
-    //
-    // However, `atg__linalg_slogdet_sign` exists in your list which takes explicit outs.
-    // We will use that to be safe if we want explicit control, but standard slogdet
-    // is usually cleaner. Let's wrap the standard one assuming `out` handles the tuple logic 
-    // or use the specific components if needed. 
-    //
-    // For this implementation, I will assume `atg__linalg_slogdet` returns the tuple 
-    // packed or via the first pointer. If the generated bindings require multiple out 
-    // pointers for tuples, the signature would usually be `(out1: ^Tensor, out2: ^Tensor...)`.
-    //
-    // Given the ambiguity of the provided `atg` signature for the tuple return, 
-    // I will implement `linalg_eigvals` which is clearly single-return.
-    
-    // Fallback logic: standard signature.
+linalg_slogdet :: proc(A: Tensor) -> (sign, logabsdet: Tensor) {    
     out: Tensor
-    t.atg__linalg_slogdet(&out, A)
-    return track(out), track(out) // Warning: This requires verification of the generated C tuple struct layout.
+    t.atg_linalg_slogdet(&out, A)
+    return track(out), track(out) // Warning: Verify the C tuple struct layout
 }
 
 linalg_solve :: proc(A: Tensor, B: Tensor, left: bool = true) -> Tensor {
     out: Tensor
     // check_errors = 1 (true) by default
-    t.atg__linalg_solve_ex(&out, A, B, c.int(1) if left else c.int(0), c.int(1))
+    t.atg__linalg_solve_ex(&out, A, B, i32(1) if left else i32(0), i32(1))
     return track(out)
 }
 
-// FFT (Fast Fourier Transform)
+// FFT Fast Fourier Transform
 
 fft_c2c :: proc(self: Tensor, dim: []i64, normalization: i64 = 1, forward: bool = true) -> Tensor {
     out: Tensor
@@ -1919,9 +1955,9 @@ fft_c2c :: proc(self: Tensor, dim: []i64, normalization: i64 = 1, forward: bool 
         &out,
         self,
         raw_data(dim),
-        c.int(len(dim)),
+        i32(len(dim)),
         normalization,
-        c.int(1) if forward else c.int(0),
+        i32(1) if forward else i32(0),
     )
     return track(out)
 }
@@ -1932,22 +1968,21 @@ fft_r2c :: proc(self: Tensor, dim: []i64, normalization: i64 = 1, onesided: bool
         &out,
         self,
         raw_data(dim),
-        c.int(len(dim)),
+        i32(len(dim)),
         normalization,
-        c.int(1) if onesided else c.int(0),
+        i32(1) if onesided else i32(0),
     )
     return track(out)
 }
 
 fft_c2r :: proc(self: Tensor, dim: []i64, normalization: i64 = 1, last_dim_size: i64 = -1) -> Tensor {
     out: Tensor
-    // If last_dim_size is not provided (standard pytorch usage), usually it's inferred.
-    // If the C API requires it, we pass what we have.
+    // TODO: If last_dim_size is not provided (standard pytorch usage), usually it's inferred
     t.atg__fft_c2r(
         &out,
         self,
         raw_data(dim),
-        c.int(len(dim)),
+        i32(len(dim)),
         normalization,
         last_dim_size,
     )
@@ -1956,26 +1991,14 @@ fft_c2r :: proc(self: Tensor, dim: []i64, normalization: i64 = 1, last_dim_size:
 
 // ACTIVATIONS / LAYERS
 
-// log_softmax :: proc(self: Tensor, dim: i64, half_to_float: bool = false) -> Tensor {
-//     out: Tensor
-//     t.atg__log_softmax(&out, self, dim, c.int(1) if half_to_float else c.int(0))
-//     return track(out)
-// }
-
-// logcumsumexp :: proc(self: Tensor, dim: i64) -> Tensor {
-//     out: Tensor
-//     t.atg__logcumsumexp(&out, self, dim)
-//     return track(out)
-// }
-
 fused_rms_norm :: proc(input: Tensor, normalized_shape: []i64, weight: Tensor, eps: f64) -> Tensor {
     out: Tensor
-    // eps_null: rawptr. If we pass nil, it implies we are providing the value in eps_v.
+    // eps_null: rawptr - if we pass nil, it implies we are providing the value in eps_v
     t.atg__fused_rms_norm(
         &out, 
         input, 
         raw_data(normalized_shape), 
-        c.int(len(normalized_shape)), 
+        i32(len(normalized_shape)), 
         weight, 
         eps, 
         nil,
@@ -2031,7 +2054,7 @@ nested_from_padded :: proc(padded: Tensor, nested_shape_example: Tensor, fuse_tr
         &out, 
         padded, 
         nested_shape_example, 
-        c.int(1) if fuse_transform else c.int(0),
+        i32(1) if fuse_transform else i32(0),
     )
     return track(out)
 }
@@ -2054,13 +2077,11 @@ nested_get_lengths :: proc(self: Tensor) -> Tensor {
     return track(out)
 }
 
-// UTILS & MISC
-
-// Used to assert async safety in JIT/Graphs, effectively a no-op identity in eager mode often
+// Used to assert async safety in JIT/Graphs, effectively no-op in eager mode
 functional_assert_async :: proc(self: Tensor, msg: string, dep_token: Tensor) -> Tensor {
     out: Tensor
     c_msg := strings.clone_to_cstring(msg, context.temp_allocator)
-    t.atg__functional_assert_async(&out, self, c_msg, c.int(len(msg)), dep_token)
+    t.atg__functional_assert_async(&out, self, c_msg, i32(len(msg)), dep_token)
     return track(out)
 }
 
@@ -2078,23 +2099,15 @@ grid_sampler_2d_cpu_fallback :: proc(
         grid, 
         interpolation_mode, 
         padding_mode, 
-        c.int(1) if align_corners else c.int(0),
+        i32(1) if align_corners else i32(0),
     )
     return track(out)
 }
 
 mkldnn_transpose_ :: proc(self: Tensor, dim0, dim1: i64) -> Tensor {
     out: Tensor
-    // Note: In-place ops in `atg` usually take an out param that is also the input, 
-    // or just modify self. The signature provided is `atg__mkldnn_transpose_(out, self, ...)`.
-    // Usually for in-place, 'out' is a dummy pointer in generated bindings, or we pass &self?
-    // Based on the binding `atg__mkldnn_transpose_(out: ^Tensor, self: Tensor...)`, 
-    // we follow the pattern of creating a dummy out struct if the C-ABI requires it 
-    // to write the result pointer, even if it is the same as input address.
-    
     t.atg__mkldnn_transpose_(&out, self, dim0, dim1)
-    
-    // For in-place, we return the input `self`, as `out` is just a handle update
+    // For in-place, we return the input `self`
     return self
 }
 
@@ -2104,8 +2117,6 @@ fill_mem_eff_dropout_mask_ :: proc(self: Tensor, dropout_p: f64, seed: i64, offs
     return self
 }
 
-//  MISC MATH & OPS ---
-
 dirichlet_grad :: proc(x, alpha, total: Tensor) -> Tensor {
     out: Tensor
     t.atg__dirichlet_grad(&out, x, alpha, total)
@@ -2114,19 +2125,18 @@ dirichlet_grad :: proc(x, alpha, total: Tensor) -> Tensor {
 
 histgramdd_from_bin_cts :: proc(self, weight: Tensor, bins: []i64, range: []f64, density: bool = false) -> Tensor {
     out: Tensor
-    t.atg__histogramdd_from_bin_cts(&out, self, raw_data(bins), c.int(len(bins)), raw_data(range), c.int(len(range)), weight, c.int(density))
+    t.atg__histogramdd_from_bin_cts(&out, self, raw_data(bins), i32(len(bins)), raw_data(range), i32(len(range)), weight, i32(density))
     return track(out)
 }
 
 // Example of TensorList input
 histgramdd_from_bin_tensors :: proc(self, weight: Tensor, bins: []Tensor, density: bool = false) -> Tensor {
     out: Tensor
-    // We assume []Tensor matches the memory layout of ^Tensor (C-array of pointers/structs)
-    t.atg__histogramdd_from_bin_tensors(&out, self, raw_data(bins), c.int(len(bins)), weight, c.int(density))
+    // We assume []Tensor matches the memory layout of ^Tensor (C-array of pointers)
+    t.atg__histogramdd_from_bin_tensors(&out, self, raw_data(bins), i32(len(bins)), weight, i32(density))
     return track(out)
 }
 
-// Returns (result, LU, pivots)
 linalg_det_result :: proc(A: Tensor) -> (result, LU, pivots: Tensor) {
     result = new_tensor()
     LU = new_tensor()
@@ -2136,56 +2146,55 @@ linalg_det_result :: proc(A: Tensor) -> (result, LU, pivots: Tensor) {
     return
 }
 
-// Returns (eigenvalues, eigenvectors)
+// Returns eigenvalues, eigenvectors
 linalg_eigh_eigenvalues :: proc(A: Tensor, uplo: string = "L", compute_v: bool = true) -> (evals, evecs: Tensor) {
     evals = new_tensor()
     evecs = new_tensor()
     c_uplo := strings.clone_to_cstring(uplo, context.temp_allocator)
     dummy: Tensor
-    t.atg__linalg_eigh_eigenvalues(&dummy, evals, evecs, A, c_uplo, c.int(len(uplo)), c.int(compute_v))
+    t.atg__linalg_eigh_eigenvalues(&dummy, evals, evecs, A, c_uplo, i32(len(uplo)), i32(compute_v))
     return
 }
 
-// Returns (sign, logabsdet, LU, pivots)
-linalg_slogdet_sign :: proc(A: Tensor) -> (sign, logabsdet, LU, pivots: Tensor) {
-    sign = new_tensor()
+// Returns sign, logabsdet, LU, pivots
+linalg_slogdet_sign :: proc(A: Tensor) -> (signed, logabsdet, LU, pivots: Tensor) {
+    signed = new_tensor()
     logabsdet = new_tensor()
     LU = new_tensor()
     pivots = new_tensor()
     dummy: Tensor
-    t.atg__linalg_slogdet_sign(&dummy, sign, logabsdet, LU, pivots, A)
+    t.atg__linalg_slogdet_sign(&dummy, signed, logabsdet, LU, pivots, A)
     return
 }
 
-// Returns (result, LU, pivots, info)
+// Returns result, LU, pivots, info
 linalg_solve_ex_result :: proc(A, B: Tensor, left: bool = true, check_errors: bool = true) -> (result, LU, pivots, info: Tensor) {
     result = new_tensor()
     LU = new_tensor()
     pivots = new_tensor()
     info = new_tensor()
     dummy: Tensor
-    t.atg__linalg_solve_ex_result(&dummy, result, LU, pivots, info, A, B, c.int(left), c.int(check_errors))
+    t.atg__linalg_solve_ex_result(&dummy, result, LU, pivots, info, A, B, i32(left), i32(check_errors))
     return
 }
 
-// Returns (U, S, Vh)
 linalg_svd_u :: proc(A: Tensor, full_matrices: bool = true, compute_uv: bool = true) -> (U, S, Vh: Tensor) {
     U = new_tensor()
     S = new_tensor()
     Vh = new_tensor()
     c_driver := cstring(nil)
     dummy: Tensor
-    t.atg__linalg_svd_u(&dummy, U, S, Vh, A, c.int(full_matrices), c.int(compute_uv), c_driver, 0)
+    t.atg__linalg_svd_u(&dummy, U, S, Vh, A, i32(full_matrices), i32(compute_uv), c_driver, 0)
     return
 }
 
 lu_with_info :: proc(self: Tensor, pivot: bool = true, check_errors: bool = true) -> Tensor {
     out: Tensor
-    t.atg__lu_with_info(&out, self, c.int(pivot), c.int(check_errors))
+    t.atg__lu_with_info(&out, self, i32(pivot), i32(check_errors))
     return track(out)
 }
 
-//  QUANTIZATION ---
+//  QUANTIZATION
 
 fake_quantize_learnable_per_tensor_affine :: proc(self, scale, zero_point: Tensor, quant_min, quant_max: i64, grad_factor: f64 = 1.0) -> Tensor {
     out: Tensor
@@ -2234,24 +2243,25 @@ make_per_channel_quantized_tensor :: proc(self, scale, zero_point: Tensor, axis:
     return track(out)
 }
 
-// Useful for manual Attention implementations
+// Useful for manual Attention implementation
 flash_attention_backward :: proc(grad_out, query, key, value, logsumexp, cum_seq_q, cum_seq_k: Tensor, max_q, max_k: i64, dropout_p: f64, is_causal: bool) -> Tensor {
     out: Tensor
-    // Passing nil for optional scales and window sizes (defaults)
-    t.atg__flash_attention_backward(&out, grad_out, query, key, value, logsumexp, cum_seq_q, cum_seq_k, max_q, max_k, dropout_p, c.int(is_causal), Tensor{}, Tensor{}, 1.0, nil, 0, nil, 0, nil)
+    // TODO: scales and window sizes
+    t.atg__flash_attention_backward(&out, grad_out, query, key, value, logsumexp, cum_seq_q, cum_seq_k, max_q, max_k, dropout_p, i32(is_causal), Tensor{}, Tensor{}, 1.0, nil, 0, nil, 0, nil)
     return track(out)
 }
 
-// LSTM (MPS specific)
+// LSTM
+
 lstm_mps :: proc(input: Tensor, hx: []Tensor, params: []Tensor, has_biases: bool, num_layers: i64, dropout: f64, train: bool, bidirectional: bool, batch_first: bool) -> Tensor {
     out: Tensor
-    t.atg__lstm_mps(&out, input, raw_data(hx), c.int(len(hx)), raw_data(params), c.int(len(params)), c.int(has_biases), num_layers, dropout, c.int(train), c.int(bidirectional), c.int(batch_first))
+    t.atg__lstm_mps(&out, input, raw_data(hx), i32(len(hx)), raw_data(params), i32(len(params)), i32(has_biases), num_layers, dropout, i32(train), i32(bidirectional), i32(batch_first))
     return track(out)
 }
 
 mps_convolution :: proc(self, weight, bias: Tensor, padding, stride, dilation: []i64, groups: i64) -> Tensor {
     out: Tensor
-    t.atg__mps_convolution(&out, self, weight, bias, raw_data(padding), c.int(len(padding)), raw_data(stride), c.int(len(stride)), raw_data(dilation), c.int(len(dilation)), groups)
+    t.atg__mps_convolution(&out, self, weight, bias, raw_data(padding), i32(len(padding)), raw_data(stride), i32(len(stride)), raw_data(dilation), i32(len(dilation)), groups)
     return track(out)
 }
 
@@ -2263,14 +2273,14 @@ gather_sparse_backward :: proc(self: Tensor, dim: i64, index, grad: Tensor) -> T
 
 mkldnn_reshape :: proc(self: Tensor, shape: []i64) -> Tensor {
     out: Tensor
-    t.atg__mkldnn_reshape(&out, self, raw_data(shape), c.int(len(shape)))
+    t.atg__mkldnn_reshape(&out, self, raw_data(shape), i32(len(shape)))
     return track(out)
 }
 
 make_dep_token :: proc(device_idx: i32 = -1) -> Tensor {
     out: Tensor
-    // kind=0 (CPU) is often default for tokens, or inferred. passing device.
-    t.atg__make_dep_token(&out, 0, c.int(device_idx)) 
+    // TODO: kind=0 (CPU) is often default for tokens, or inferred
+    t.atg__make_dep_token(&out, 0, i32(device_idx)) 
     return track(out)
 }
 
@@ -2289,8 +2299,8 @@ nested_sum_backward :: proc(grad: Tensor, self: Tensor, dims: []i64, keepdim: bo
         grad, 
         self, 
         raw_data(dims), 
-        c.int(len(dims)), 
-        c.int(keepdim),
+        i32(len(dims)), 
+        i32(keepdim),
     )
     return track(out)
 }
@@ -2305,17 +2315,18 @@ nested_view_from_buffer :: proc(self, nested_size, nested_strides, offsets: Tens
 
 pack_padded_sequence :: proc(input: Tensor, lengths: Tensor, batch_first: bool = false) -> Tensor {
     out: Tensor
-    t.atg__pack_padded_sequence(&out, input, lengths, c.int(batch_first))
+    t.atg__pack_padded_sequence(&out, input, lengths, i32(batch_first))
     return track(out)
 }
 
 pad_circular :: proc(self: Tensor, padding: []i64) -> Tensor {
     out: Tensor
-    t.atg__pad_circular(&out, self, raw_data(padding), c.int(len(padding)))
+    t.atg__pad_circular(&out, self, raw_data(padding), i32(len(padding)))
     return track(out)
 }
 
-// pad_enum handles constant padding with specific values
+// pad handles constant padding with specific mode and value
+// TODO enum for mode (e.g. "constant", "reflect", "replicate", "circular")
 pad :: proc(self: Tensor, padding: []i64, mode: i64, value: f64 = 0.0) -> Tensor {
     out: Tensor
     // value_null determines if the optional value is present. 
@@ -2325,7 +2336,7 @@ pad :: proc(self: Tensor, padding: []i64, mode: i64, value: f64 = 0.0) -> Tensor
         &out, 
         self, 
         raw_data(padding), 
-        c.int(len(padding)), 
+        i32(len(padding)), 
         mode, 
         val, 
         &val, // Non-nil pointer implies value is set
@@ -2336,16 +2347,16 @@ pad :: proc(self: Tensor, padding: []i64, mode: i64, value: f64 = 0.0) -> Tensor
 pad_sequence :: proc(sequences: []Tensor, batch_first: bool = false, padding_value: f64 = 0, padding_side: string = "right") -> Tensor {
     out: Tensor
     side_cstr := strings.clone_to_cstring(padding_side, context.temp_allocator)
-    batch_first_int := c.int(1) if batch_first else c.int(0)
+    batch_first_int := i32(1) if batch_first else i32(0)
     
     t.atg_pad_sequence(
         &out, 
         raw_data(sequences), 
-        c.int(len(sequences)), 
+        i32(len(sequences)), 
         batch_first_int, 
         padding_value, 
         side_cstr, 
-        c.int(len(padding_side)),
+        i32(len(padding_side)),
     )
     return track(out)
 }
@@ -2358,33 +2369,12 @@ reshape_alias :: proc(self: Tensor, size: []i64, stride: []i64) -> Tensor {
         &out, 
         self, 
         raw_data(size), 
-        c.int(len(size)), 
+        i32(len(size)), 
         raw_data(stride), 
-        c.int(len(stride)),
+        i32(len(stride)),
     )
     return track(out)
 }
-
-// stack :: proc(tensors: []Tensor, dim: i64 = 0) -> Tensor {
-//     out: Tensor
-//     // Pass the pointer to the first Tensor in the slice
-//     t.atg__stack(&out, raw_data(tensors), c.int(len(tensors)), dim)
-//     return track(out)
-// }
-
-// NN & MATH OPERATIONS
-
-// softmax :: proc(self: Tensor, dim: i64, half_to_float: bool = false) -> Tensor {
-//     out: Tensor
-//     t.atg__softmax(&out, self, dim, c.int(half_to_float))
-//     return track(out)
-// }
-
-// safe_softmax :: proc(self: Tensor, dim: i64, dtype: ScalarType) -> Tensor {
-//     out: Tensor
-//     t.atg__safe_softmax(&out, self, dim, c.int(dtype))
-//     return track(out)
-// }
 
 // ATTENTION (SDPA)
 
@@ -2403,9 +2393,9 @@ scaled_dot_product_efficient_attention :: proc(
 
     t.atg__scaled_dot_product_efficient_attention(
         &out, query, key, value, attn_bias,
-        c.int(compute_log_sumexp),
+        i32(compute_log_sumexp),
         dropout_p,
-        c.int(is_causal),
+        i32(is_causal),
         s_val, s_ptr,
     )
     return track(out)
@@ -2425,52 +2415,6 @@ sparse_addmm :: proc(self, mat1, mat2: Tensor) -> Tensor {
     return track(out)
 }
 
-// Creation from COO (Coordinate format)
-// sparse_coo_tensor :: proc(
-//     indices: Tensor, 
-//     values: Tensor, 
-//     size: []i64, 
-//     options_kind: i32 = 0, 
-//     options_device: i32 = 0, // CPU by default
-//     is_coalesced: bool = false,
-// ) -> Tensor {
-//     out: Tensor
-//     t.atg__sparse_coo_tensor_unsafe(
-//         &out,
-//         indices,
-//         values,
-//         raw_data(size),
-//         c.int(len(size)),
-//         c.int(options_kind),
-//         c.int(options_device),
-//         c.int(is_coalesced),
-//     )
-//     return track(out)
-// }
-
-// Creation from CSR (Compressed Sparse Row)
-// sparse_csr_tensor :: proc(
-//     crow_indices: Tensor,
-//     col_indices: Tensor,
-//     values: Tensor,
-//     size: []i64,
-//     options_kind: i32 = 0,
-//     options_device: i32 = 0,
-// ) -> Tensor {
-//     out: Tensor
-//     t.atg__sparse_csr_tensor_unsafe(
-//         &out,
-//         crow_indices,
-//         col_indices,
-//         values,
-//         raw_data(size),
-//         c.int(len(size)),
-//         c.int(options_kind),
-//         c.int(options_device),
-//     )
-//     return track(out)
-// }
-
 sparse_sum :: proc(self: Tensor) -> Tensor {
     out: Tensor
     t.atg__sparse_sum(&out, self)
@@ -2479,11 +2423,9 @@ sparse_sum :: proc(self: Tensor) -> Tensor {
 
 sparse_sum_dim :: proc(self: Tensor, dims: []i64) -> Tensor {
     out: Tensor
-    t.atg__sparse_sum_dim(&out, self, raw_data(dims), c.int(len(dims)))
+    t.atg__sparse_sum_dim(&out, self, raw_data(dims), i32(len(dims)))
     return track(out)
 }
-
-// MATH & ELEMENT-WISE OPERATIONS
 
 abs :: proc(self: Tensor) -> Tensor {
     out: Tensor
@@ -2520,8 +2462,6 @@ acosh_ :: proc(self: Tensor) -> Tensor {
     t.atg_acosh_(&out, self)
     return self
 }
-
-// ADDITION FAMILY (Extending existing 'add' overload)
 
 add_scalar :: proc(self: Tensor, other: Scalar) -> Tensor {
     out: Tensor
@@ -2603,21 +2543,21 @@ adaptive_avg_pool1d :: proc(self: Tensor, output_size: []i64) -> Tensor {
         &out, 
         self, 
         raw_data(output_size), 
-        c.int(len(output_size)),
+        i32(len(output_size)),
     )
     return track(out)
 }
 
 adaptive_max_pool2d :: proc(self: Tensor, output_size: []i64) -> Tensor {
-    // Note: In C++ this usually returns a tuple (Output, Indices).
-    // The provided signature only has `out`, which usually implies 
-    // it returns the values tensor.
+    // NOTE: In C++ this usually returns a tuple (Output, Indices).
+    // The provided signature only has `out`
+    // usually implies it returns the values tensor.
     out: Tensor
     t.atg_adaptive_max_pool2d(
         &out, 
         self, 
         raw_data(output_size), 
-        c.int(len(output_size)),
+        i32(len(output_size)),
     )
     return track(out)
 }
@@ -2633,7 +2573,7 @@ multi_head_attention :: proc(
     mask: Tensor = {},
 ) -> Tensor {
     out: Tensor
-    // Note: mask can be undefined (empty tensor) if not used
+    // NOTE: mask can be undefined (empty tensor) if not used
     t.atg__triton_multi_head_attention(
         &out,
         query, key, value,
@@ -2661,12 +2601,12 @@ transformer_encoder_layer :: proc(
 ) -> Tensor {
     out: Tensor
     
-    use_gelu_int := c.int(1) if use_gelu else c.int(0)
-    norm_first_int := c.int(1) if norm_first else c.int(0)
+    use_gelu_int := i32(1) if use_gelu else i32(0)
+    norm_first_int := i32(1) if norm_first else i32(0)
     
-    // Handling Optional Mask Type
+    // Handle optional Mask Type
     // If mask is defined, we assume default type behavior (passed as null ptr)
-    // If specific mask logic is needed, the `mask_type` int64 pointer would need to be passed.
+    // TODO: `mask_type` int64 pointer needs to be parsed as enum
     
     t.atg__transformer_encoder_layer_fwd(
         &out,
@@ -2694,42 +2634,39 @@ transformer_encoder_layer :: proc(
 
 affine_grid_generator :: proc(theta: Tensor, size: []i64, align_corners: bool) -> Tensor {
     out: Tensor
-    align_c := c.int(1) if align_corners else c.int(0)
-    t.atg_affine_grid_generator(&out, theta, raw_data(size), c.int(len(size)), align_c)
+    align_c := i32(1) if align_corners else i32(0)
+    t.atg_affine_grid_generator(&out, theta, raw_data(size), i32(len(size)), align_c)
     return track(out)
 }
 
-// arange overloads
 arange :: proc{arange_end, arange_start, arange_step}
 
 arange_end :: proc(end: Scalar, dtype: i32, device: i32) -> Tensor {
     out: Tensor
-    t.atg_arange(&out, end, c.int(dtype), c.int(device))
+    t.atg_arange(&out, end, i32(dtype), i32(device))
     return track(out)
 }
 
 arange_start :: proc(start, end: Scalar, dtype: i32, device: i32) -> Tensor {
     out: Tensor
-    t.atg_arange_start(&out, start, end, c.int(dtype), c.int(device))
+    t.atg_arange_start(&out, start, end, i32(dtype), i32(device))
     return track(out)
 }
 
 arange_step :: proc(start, end, step: Scalar, dtype: i32, device: i32) -> Tensor {
     out: Tensor
-    t.atg_arange_start_step(&out, start, end, step, c.int(dtype), c.int(device))
+    t.atg_arange_start_step(&out, start, end, step, i32(dtype), i32(device))
     return track(out)
 }
 
 bartlett_window :: proc(window_length: i64, periodic: bool = true, dtype: i32, device: i32) -> Tensor {
     out: Tensor
-    p_int := c.int(1) if periodic else c.int(0)
-    // Note: PyTorch has two C variants, one with explicit periodic, one without. 
-    // We map to the specific one based on arguments or just use the periodic one.
-    t.atg_bartlett_window_periodic(&out, window_length, p_int, c.int(dtype), c.int(device))
+    p_int := i32(1) if periodic else i32(0)
+    t.atg_bartlett_window_periodic(&out, window_length, p_int, i32(dtype), i32(device))
     return track(out)
 }
 
-//  MEMORY / VIEWS ---
+//  MEMORY / VIEWS
 
 alias :: proc(self: Tensor) -> Tensor {
     out: Tensor
@@ -2750,16 +2687,14 @@ as_strided :: proc(self: Tensor, size: []i64, stride: []i64, storage_offset: May
     
     if v, ok := storage_offset.?; ok {
         offset_val = v
-        offset_ptr = &offset_val // Not strictly used by binding logic if null is passed, but specific bindings vary
+        offset_ptr = &offset_val // Not strictly used by binding logic if null is passed
     }
-    
-    // Note: The raw binding requires `storage_offset_v` AND `storage_offset_null` (as a ptr check).
-    // We pass the value and the pointer to the value (or nil) to satisfy the C wrapper generation.
-    t.atg_as_strided(&out, self, raw_data(size), c.int(len(size)), raw_data(stride), c.int(len(stride)), offset_val, offset_ptr)
+    // NOTE: The raw binding requires `storage_offset_v` AND `storage_offset_null` (as a ptr check).
+    t.atg_as_strided(&out, self, raw_data(size), i32(len(size)), raw_data(stride), i32(len(stride)), offset_val, offset_ptr)
     return track(out)
 }
 
-//  REDUCTION & LOGIC ---
+//  REDUCTION & LOGIC
 
 all :: proc{all_tensor, all_dim}
 
@@ -2771,7 +2706,7 @@ all_tensor :: proc(self: Tensor) -> Tensor {
 
 all_dim :: proc(self: Tensor, dim: i64, keepdim: bool = false) -> Tensor {
     out: Tensor
-    t.atg_all_dim(&out, self, dim, c.int(keepdim))
+    t.atg_all_dim(&out, self, dim, i32(keepdim))
     return track(out)
 }
 
@@ -2785,19 +2720,19 @@ any_tensor :: proc(self: Tensor) -> Tensor {
 
 any_dim :: proc(self: Tensor, dim: i64, keepdim: bool = false) -> Tensor {
     out: Tensor
-    t.atg_any_dim(&out, self, dim, c.int(keepdim))
+    t.atg_any_dim(&out, self, dim, i32(keepdim))
     return track(out)
 }
 
 amax :: proc(self: Tensor, dim: []i64, keepdim: bool = false) -> Tensor {
     out: Tensor
-    t.atg_amax(&out, self, raw_data(dim), c.int(len(dim)), c.int(keepdim))
+    t.atg_amax(&out, self, raw_data(dim), i32(len(dim)), i32(keepdim))
     return track(out)
 }
 
 amin :: proc(self: Tensor, dim: []i64, keepdim: bool = false) -> Tensor {
     out: Tensor
-    t.atg_amin(&out, self, raw_data(dim), c.int(len(dim)), c.int(keepdim))
+    t.atg_amin(&out, self, raw_data(dim), i32(len(dim)), i32(keepdim))
     return track(out)
 }
 
@@ -2809,7 +2744,7 @@ argmax :: proc(self: Tensor, dim: Maybe(i64) = nil, keepdim: bool = false) -> Te
         dim_val = v
         dim_ptr = &dim_val
     }
-    t.atg_argmax(&out, self, dim_val, dim_ptr, c.int(keepdim))
+    t.atg_argmax(&out, self, dim_val, dim_ptr, i32(keepdim))
     return track(out)
 }
 
@@ -2821,21 +2756,21 @@ argmin :: proc(self: Tensor, dim: Maybe(i64) = nil, keepdim: bool = false) -> Te
         dim_val = v
         dim_ptr = &dim_val
     }
-    t.atg_argmin(&out, self, dim_val, dim_ptr, c.int(keepdim))
+    t.atg_argmin(&out, self, dim_val, dim_ptr, i32(keepdim))
     return track(out)
 }
 
 argsort :: proc(self: Tensor, dim: i64 = -1, descending: bool = false, stable: bool = false) -> Tensor {
     out: Tensor
     if stable {
-        t.atg_argsort_stable(&out, self, c.int(1), dim, c.int(descending))
+        t.atg_argsort_stable(&out, self, i32(1), dim, i32(descending))
     } else {
-        t.atg_argsort(&out, self, dim, c.int(descending))
+        t.atg_argsort(&out, self, dim, i32(descending))
     }
     return track(out)
 }
 
-//  MATH / TRIGONOMETRY ---
+//  TRIGONOMETRY
 
 arccos :: proc(self: Tensor) -> Tensor { out: Tensor; t.atg_arccos(&out, self); return track(out) }
 arccos_ :: proc(self: Tensor) -> Tensor { 
@@ -2867,7 +2802,7 @@ arctan2_ :: proc(self, other: Tensor) -> Tensor {
 
 angle :: proc(self: Tensor) -> Tensor { out: Tensor; t.atg_angle(&out, self); return track(out) }
 
-//  POOLING ---
+//  POOLING
 
 avg_pool2d :: proc(self: Tensor, kernel_size: []i64, stride: []i64, padding: []i64, ceil_mode: bool = false, count_include_pad: bool = true, divisor_override: Maybe(i64) = nil) -> Tensor {
     out: Tensor
@@ -2881,10 +2816,10 @@ avg_pool2d :: proc(self: Tensor, kernel_size: []i64, stride: []i64, padding: []i
 
     t.atg_avg_pool2d(
         &out, self,
-        raw_data(kernel_size), c.int(len(kernel_size)),
-        raw_data(stride), c.int(len(stride)),
-        raw_data(padding), c.int(len(padding)),
-        c.int(ceil_mode), c.int(count_include_pad),
+        raw_data(kernel_size), i32(len(kernel_size)),
+        raw_data(stride), i32(len(stride)),
+        raw_data(padding), i32(len(padding)),
+        i32(ceil_mode), i32(count_include_pad),
         div_val, div_ptr,
     )
     return track(out)
@@ -2902,26 +2837,26 @@ avg_pool3d :: proc(self: Tensor, kernel_size: []i64, stride: []i64, padding: []i
 
     t.atg_avg_pool3d(
         &out, self,
-        raw_data(kernel_size), c.int(len(kernel_size)),
-        raw_data(stride), c.int(len(stride)),
-        raw_data(padding), c.int(len(padding)),
-        c.int(ceil_mode), c.int(count_include_pad),
+        raw_data(kernel_size), i32(len(kernel_size)),
+        raw_data(stride), i32(len(stride)),
+        raw_data(padding), i32(len(padding)),
+        i32(ceil_mode), i32(count_include_pad),
         div_val, div_ptr,
     )
     return track(out)
 }
 
-//  NORMALIZATION / DROPOUT ---
+//  NORMALIZATION / DROPOUT
 
 alpha_dropout :: proc(self: Tensor, p: f64, train: bool) -> Tensor {
     out: Tensor
-    t.atg_alpha_dropout(&out, self, p, c.int(train))
+    t.atg_alpha_dropout(&out, self, p, i32(train))
     return track(out)
 }
 
 alpha_dropout_ :: proc(self: Tensor, p: f64, train: bool) -> Tensor {
     out: Tensor
-    t.atg_alpha_dropout_(&out, self, p, c.int(train))
+    t.atg_alpha_dropout_(&out, self, p, i32(train))
     return self
 }
 
@@ -2929,12 +2864,12 @@ batch_norm :: proc(input, weight, bias, running_mean, running_var: Tensor, train
     out: Tensor
     t.atg_batch_norm(
         &out, input, weight, bias, running_mean, running_var, 
-        c.int(training), momentum, eps, c.int(cudnn_enabled),
+        i32(training), momentum, eps, i32(cudnn_enabled),
     )
     return track(out)
 }
 
-//  PROBABILITY ---
+//  PROBABILITY
 
 bernoulli :: proc{bernoulli_tensor, bernoulli_p}
 
@@ -2970,7 +2905,7 @@ bincount :: proc(self: Tensor, weights: Tensor = {}, minlength: i64 = 0) -> Tens
     return track(out)
 }
 
-//  LINEAR ALGEBRA / MATRIX ---
+//  LINEAR ALGEBRA / MATRIX OPS
 
 baddbmm :: proc(self, batch1, batch2: Tensor, beta: Scalar, alpha: Scalar) -> Tensor {
     out: Tensor
@@ -2986,13 +2921,11 @@ bilinear :: proc(input1, input2, weight, bias: Tensor) -> Tensor {
 
 blackman_window :: proc(window_length: i64, periodic: bool = true, dtype: i32 = 6 /*Float*/, device: i32 = 0 /*CPU*/) -> Tensor {
     out: Tensor
-    // Maps to options_kind (ScalarType) and options_device (DeviceType)
-    // Defaults are approximations based on Torch defaults.
     if periodic {
-        t.atg_blackman_window_periodic(&out, window_length, 1, c.int(dtype), c.int(device))
+        t.atg_blackman_window_periodic(&out, window_length, 1, i32(dtype), i32(device))
     } else {
-        // Standard call if not periodic specific, though periodic=1 is usually default in torch
-        t.atg_blackman_window(&out, window_length, c.int(dtype), c.int(device))
+        // Standard call if not periodic specific, periodic=1 is usually default in torch
+        t.atg_blackman_window(&out, window_length, i32(dtype), i32(device))
     }
     return track(out)
 }
@@ -3005,35 +2938,35 @@ bmm :: proc(self, mat2: Tensor) -> Tensor {
 
 block_diag :: proc(tensors: []Tensor) -> Tensor {
     out: Tensor
-    t.atg_block_diag(&out, raw_data(tensors), c.int(len(tensors)))
+    t.atg_block_diag(&out, raw_data(tensors), i32(len(tensors)))
     return track(out)
 }
 
 chain_matmul :: proc(matrices: []Tensor) -> Tensor {
     out: Tensor
-    t.atg_chain_matmul(&out, raw_data(matrices), c.int(len(matrices)))
+    t.atg_chain_matmul(&out, raw_data(matrices), i32(len(matrices)))
     return track(out)
 }
 
 cholesky :: proc(self: Tensor, upper: bool = false) -> Tensor {
     out: Tensor
-    t.atg_cholesky(&out, self, c.int(upper))
+    t.atg_cholesky(&out, self, i32(upper))
     return track(out)
 }
 
 cholesky_inverse :: proc(self: Tensor, upper: bool = false) -> Tensor {
     out: Tensor
-    t.atg_cholesky_inverse(&out, self, c.int(upper))
+    t.atg_cholesky_inverse(&out, self, i32(upper))
     return track(out)
 }
 
 cholesky_solve :: proc(self, input2: Tensor, upper: bool = false) -> Tensor {
     out: Tensor
-    t.atg_cholesky_solve(&out, self, input2, c.int(upper))
+    t.atg_cholesky_solve(&out, self, input2, i32(upper))
     return track(out)
 }
 
-// cdist: compute_mode is optional (use -1 or 0 if not specified usually, or handle via null)
+// cdist: compute_mode is optional (use -1 or 0 if not specified, or handle via null)
 cdist :: proc(x1, x2: Tensor, p: f64 = 2.0, compute_mode: Maybe(i64) = nil) -> Tensor {
     out: Tensor
     
@@ -3043,20 +2976,10 @@ cdist :: proc(x1, x2: Tensor, p: f64 = 2.0, compute_mode: Maybe(i64) = nil) -> T
     if m, ok := compute_mode.?; ok {
         mode_val = m
         mode_ptr = &mode_val // Actually pointing to stack var might be unsafe if C stores it, but here it reads immediately.
-        // However, atg pattern with _v and _null usually implies passing value directly or null ptr
-        // The signature is: compute_mode_v: i64, compute_mode_null: rawptr
-        // Typically in this binding generator: if ptr is null, use value, or vice versa depending on generation logic.
-        // Assuming: Pass the value in _v, and if we want "None", we rely on how the shim interprets it. 
-        // For safe interoperability with this specific shim pattern:
         t.atg_cdist(&out, x1, x2, p, mode_val, nil) 
     } else {
-        // Pass a dummy value and a marker (if the C wrapper checks the ptr to know if it's set)
-        // Or often the C wrapper logic is: if (compute_mode_null) ...
-        // We will pass 0 and a distinct pointer if required, but based on sig:
-        // usually passing 0 for the value and a specific flag is needed. 
-        // Let's assume default behavior.
+        // Pass a dummy value and a marker
         t.atg_cdist(&out, x1, x2, p, 0, rawptr(&mode_val)) // sending non-null to indicate "default"? 
-        // actually, safely, usually just 0 works for "use_mm_for_euclidean_distance" defaults
     }
     return track(out)
 }
@@ -3069,7 +2992,6 @@ corrcoef :: proc(self: Tensor) -> Tensor {
 
 cov :: proc(self: Tensor, correction: i64 = 1, fweights: Tensor = {}, aweights: Tensor = {}) -> Tensor {
     out: Tensor
-    // Handle optional tensors if they are undefined (empty structs usually work if C checks .defined())
     t.atg_cov(&out, self, correction, fweights, aweights)
     return track(out)
 }
@@ -3079,9 +3001,6 @@ cross :: proc(self, other: Tensor, dim: Maybe(i64) = nil) -> Tensor {
     if d, ok := dim.?; ok {
         t.atg_cross(&out, self, other, d, nil)
     } else {
-        // Pass a pointer to indicate null/None if the shim expects it, 
-        // or a dummy value. Based on signature `dim_v, dim_null`, 
-        // usually `dim_null` being non-null means "ignore dim_v".
         dummy: i64 = 0
         t.atg_cross(&out, self, other, 0, &dummy)
     }
@@ -3092,7 +3011,7 @@ cross :: proc(self, other: Tensor, dim: Maybe(i64) = nil) -> Tensor {
 
 broadcast_to :: proc(self: Tensor, size: []i64) -> Tensor {
     out: Tensor
-    t.atg_broadcast_to(&out, self, raw_data(size), c.int(len(size)))
+    t.atg_broadcast_to(&out, self, raw_data(size), i32(len(size)))
     return track(out)
 }
 
@@ -3100,40 +3019,40 @@ bucketize :: proc{bucketize_tensor, bucketize_scalar}
 
 bucketize_tensor :: proc(self: Tensor, boundaries: Tensor, out_int32: bool = false, right: bool = false) -> Tensor {
     out: Tensor
-    t.atg_bucketize(&out, self, boundaries, c.int(out_int32), c.int(right))
+    t.atg_bucketize(&out, self, boundaries, i32(out_int32), i32(right))
     return track(out)
 }
 
 bucketize_scalar :: proc(self: Scalar, boundaries: Tensor, out_int32: bool = false, right: bool = false) -> Tensor {
     out: Tensor
-    t.atg_bucketize_scalar(&out, self, boundaries, c.int(out_int32), c.int(right))
+    t.atg_bucketize_scalar(&out, self, boundaries, i32(out_int32), i32(right))
     return track(out)
 }
 
 cartesian_prod :: proc(tensors: []Tensor) -> Tensor {
     out: Tensor
-    t.atg_cartesian_prod(&out, raw_data(tensors), c.int(len(tensors)))
+    t.atg_cartesian_prod(&out, raw_data(tensors), i32(len(tensors)))
     return track(out)
 }
 
 cat :: proc(tensors: []Tensor, dim: i64 = 0) -> Tensor {
     out: Tensor
-    t.atg_cat(&out, raw_data(tensors), c.int(len(tensors)), dim)
+    t.atg_cat(&out, raw_data(tensors), i32(len(tensors)), dim)
     return track(out)
 }
-// Aliases
+
 concat :: cat
 concatenate :: cat
 
 column_stack :: proc(tensors: []Tensor) -> Tensor {
     out: Tensor
-    t.atg_column_stack(&out, raw_data(tensors), c.int(len(tensors)))
+    t.atg_column_stack(&out, raw_data(tensors), i32(len(tensors)))
     return track(out)
 }
 
 combinations :: proc(self: Tensor, r: i64 = 2, with_replacement: bool = false) -> Tensor {
     out: Tensor
-    t.atg_combinations(&out, self, r, c.int(with_replacement))
+    t.atg_combinations(&out, self, r, i32(with_replacement))
     return track(out)
 }
 
@@ -3152,16 +3071,15 @@ contiguous :: proc(self: Tensor) -> Tensor {
 col2im :: proc(self: Tensor, output_size, kernel_size, dilation, padding, stride: []i64) -> Tensor {
     out: Tensor
     t.atg_col2im(&out, self, 
-        raw_data(output_size), c.int(len(output_size)),
-        raw_data(kernel_size), c.int(len(kernel_size)),
-        raw_data(dilation), c.int(len(dilation)),
-        raw_data(padding), c.int(len(padding)),
-        raw_data(stride), c.int(len(stride)),
+        raw_data(output_size), i32(len(output_size)),
+        raw_data(kernel_size), i32(len(kernel_size)),
+        raw_data(dilation), i32(len(dilation)),
+        raw_data(padding), i32(len(padding)),
+        raw_data(stride), i32(len(stride)),
     )
     return track(out)
 }
 
-// Main clamp group: Requires both min and max args
 clamp :: proc{
     clamp_scalar, 
     clamp_tensor,
@@ -3258,7 +3176,7 @@ clamp_max_tensor_ :: proc(self: Tensor, max: Tensor) -> Tensor {
 }
 
 // DIVISION
-// Grouping scalar, tensor, and rounding-mode variants
+
 div :: proc{
     div_tensor, 
     div_scalar, 
@@ -3285,18 +3203,19 @@ div_scalar :: proc(self: Tensor, other: Scalar) -> Tensor {
     return track(out)
 }
 
-// "trunc" or "floor"
+// TODO: enum "trunc" or "floor"
 div_tensor_mode :: proc(self, other: Tensor, rounding_mode: string) -> Tensor {
     out: Tensor
     mode_cstr := strings.clone_to_cstring(rounding_mode, context.temp_allocator)
-    t.atg_div_tensor_mode(&out, self, other, mode_cstr, c.int(len(rounding_mode)))
+    t.atg_div_tensor_mode(&out, self, other, mode_cstr, i32(len(rounding_mode)))
     return track(out)
 }
 
+// TODO: enum "trunc" or "floor"
 div_scalar_mode :: proc(self: Tensor, other: Scalar, rounding_mode: string) -> Tensor {
     out: Tensor
     mode_cstr := strings.clone_to_cstring(rounding_mode, context.temp_allocator)
-    t.atg_div_scalar_mode(&out, self, other, mode_cstr, c.int(len(rounding_mode)))
+    t.atg_div_scalar_mode(&out, self, other, mode_cstr, i32(len(rounding_mode)))
     return track(out)
 }
 
@@ -3312,17 +3231,19 @@ div_scalar_ :: proc(self: Tensor, other: Scalar) -> Tensor {
     return self
 }
 
+// TODO: enum "trunc" or "floor"
 div_tensor_mode_ :: proc(self, other: Tensor, rounding_mode: string) -> Tensor {
     out: Tensor
     mode_cstr := strings.clone_to_cstring(rounding_mode, context.temp_allocator)
-    t.atg_div_tensor_mode_(&out, self, other, mode_cstr, c.int(len(rounding_mode)))
+    t.atg_div_tensor_mode_(&out, self, other, mode_cstr, i32(len(rounding_mode)))
     return self
 }
 
+// TODO: enum "trunc" or "floor"
 div_scalar_mode_ :: proc(self: Tensor, other: Scalar, rounding_mode: string) -> Tensor {
     out: Tensor
     mode_cstr := strings.clone_to_cstring(rounding_mode, context.temp_allocator)
-    t.atg_div_scalar_mode_(&out, self, other, mode_cstr, c.int(len(rounding_mode)))
+    t.atg_div_scalar_mode_(&out, self, other, mode_cstr, i32(len(rounding_mode)))
     return self
 }
 
@@ -3381,9 +3302,6 @@ digamma :: proc(self: Tensor) -> Tensor {
 
 // Distance
 dist :: proc(self, other: Tensor, p: f64 = 2.0) -> Tensor {
-    // Note: dist usually takes a 'p' argument, but the provided signature 
-    // `atg_dist` in the list only shows (out, self, other). 
-    // Assuming default p=2 or strictly following the signature provided:
     out: Tensor
     t.atg_dist(&out, self, other)
     return track(out)
@@ -3406,14 +3324,13 @@ einsum :: proc(equation: string, tensors: []Tensor) -> Tensor {
     out: Tensor
     eq_cstr := strings.clone_to_cstring(equation, context.temp_allocator)
     
-    // We pass the pointer to the first element of the tensor slice
-    // path_data is optional optimization, passing null/0 for now
+    // TODO: path_data is optional optimization
     t.atg_einsum(
         &out, 
         eq_cstr, 
-        c.int(len(equation)), 
+        i32(len(equation)), 
         raw_data(tensors), 
-        c.int(len(tensors)), 
+        i32(len(tensors)), 
         nil, 
         0,
     )
@@ -3435,13 +3352,13 @@ diagonal :: proc(self: Tensor, offset: i64 = 0, dim1: i64 = 0, dim2: i64 = 1) ->
 // DROPOUT
 dropout :: proc(input: Tensor, p: f64, train: bool) -> Tensor {
     out: Tensor
-    t.atg_dropout(&out, input, p, c.int(1) if train else c.int(0))
+    t.atg_dropout(&out, input, p, i32(1) if train else i32(0))
     return track(out)
 }
 
 dropout_ :: proc(self: Tensor, p: f64, train: bool) -> Tensor {
     out: Tensor
-    t.atg_dropout_(&out, self, p, c.int(1) if train else c.int(0))
+    t.atg_dropout_(&out, self, p, i32(1) if train else i32(0))
     return self
 }
 
@@ -3458,8 +3375,8 @@ embedding :: proc(
         weight, 
         indices, 
         padding_idx, 
-        c.int(1) if scale_grad_by_freq else c.int(0), 
-        c.int(1) if sparse else c.int(0),
+        i32(1) if scale_grad_by_freq else i32(0), 
+        i32(1) if sparse else i32(0),
     )
     return track(out)
 }
@@ -3478,11 +3395,11 @@ ctc_loss_arrays :: proc(
         &out, 
         log_probs, 
         targets, 
-        raw_data(input_lengths), c.int(len(input_lengths)),
-        raw_data(target_lengths), c.int(len(target_lengths)),
+        raw_data(input_lengths), i32(len(input_lengths)),
+        raw_data(target_lengths), i32(len(target_lengths)),
         blank,
         reduction,
-        c.int(1) if zero_infinity else c.int(0),
+        i32(1) if zero_infinity else i32(0),
     )
     return track(out)
 }
@@ -3504,7 +3421,7 @@ ctc_loss_tensors :: proc(
         target_lengths,
         blank,
         reduction,
-        c.int(1) if zero_infinity else c.int(0),
+        i32(1) if zero_infinity else i32(0),
     )
     return track(out)
 }
@@ -3518,10 +3435,10 @@ ctc_loss :: proc(
     out: Tensor
     t.atg__ctc_loss(
         &out, log_probs, targets,
-        raw_data(input_lengths), c.int(len(input_lengths)),
-        raw_data(target_lengths), c.int(len(target_lengths)),
+        raw_data(input_lengths), i32(len(input_lengths)),
+        raw_data(target_lengths), i32(len(target_lengths)),
         blank,
-        c.int(1) if zero_infinity else c.int(0),
+        i32(1) if zero_infinity else i32(0),
     )
     return track(out)
 }
@@ -3535,22 +3452,22 @@ empty :: proc(
     out: Tensor
     t.atg_empty(
         &out, 
-        raw_data(size), c.int(len(size)), 
-        c.int(options_kind), 
-        c.int(options_device),
+        raw_data(size), i32(len(size)), 
+        i32(options_kind), 
+        i32(options_device),
     )
     return track(out)
 }
 
 eye :: proc(n: i64, options_kind: i32 = i32(ScalarType.Float), options_device: i32 = 0) -> Tensor {
     out: Tensor
-    t.atg_eye(&out, n, c.int(options_kind), c.int(options_device))
+    t.atg_eye(&out, n, i32(options_kind), i32(options_device))
     return track(out)
 }
 
 eye_m :: proc(n, m: i64, options_kind: i32 = i32(ScalarType.Float), options_device: i32 = 0) -> Tensor {
     out: Tensor
-    t.atg_eye_m(&out, n, m, c.int(options_kind), c.int(options_device))
+    t.atg_eye_m(&out, n, m, i32(options_kind), i32(options_device))
     return track(out)
 }
 
@@ -3575,7 +3492,7 @@ detach_ :: proc(self: Tensor) -> Tensor {
 
 dstack :: proc(tensors: []Tensor) -> Tensor {
     out: Tensor
-    t.atg_dstack(&out, raw_data(tensors), c.int(len(tensors)))
+    t.atg_dstack(&out, raw_data(tensors), i32(len(tensors)))
     return track(out)
 }
 
@@ -3585,16 +3502,15 @@ expand :: proc(self: Tensor, size: []i64, implicit: bool = false) -> Tensor {
         &out, 
         self, 
         raw_data(size), 
-        c.int(len(size)), 
-        c.int(1) if implicit else c.int(0),
+        i32(len(size)), 
+        i32(1) if implicit else i32(0),
     )
     return track(out)
 }
 
 cummax :: proc(self: Tensor, dim: i64) -> Tensor {
-    // Note: PyTorch cummax usually returns (values, indices).
-    // The specific signature `atg_cummax` provided takes only one `out: ^Tensor`.
-    // This wrapper assumes the binding returns the value tensor.
+    // NOTE: PyTorch cummax usually returns (values, indices).
+    // TODO: wrapper assumes the binding returns the value tensor.
     out: Tensor
     t.atg_cummax(&out, self, dim)
     return track(out)
@@ -3608,25 +3524,25 @@ cummin :: proc(self: Tensor, dim: i64) -> Tensor {
 
 cumprod :: proc(self: Tensor, dim: i64, dtype: ScalarType = .Float) -> Tensor {
     out: Tensor
-    t.atg_cumprod(&out, self, dim, c.int(dtype))
+    t.atg_cumprod(&out, self, dim, i32(dtype))
     return track(out)
 }
 
 cumsum :: proc(self: Tensor, dim: i64, dtype: ScalarType = .Float) -> Tensor {
     out: Tensor
-    t.atg_cumsum(&out, self, dim, c.int(dtype))
+    t.atg_cumsum(&out, self, dim, i32(dtype))
     return track(out)
 }
 
 cumprod_ :: proc(self: Tensor, dim: i64, dtype: ScalarType = .Float) -> Tensor {
     out: Tensor
-    t.atg_cumprod_(&out, self, dim, c.int(dtype))
+    t.atg_cumprod_(&out, self, dim, i32(dtype))
     return self
 }
 
 cumsum_ :: proc(self: Tensor, dim: i64, dtype: ScalarType = .Float) -> Tensor {
     out: Tensor
-    t.atg_cumsum_(&out, self, dim, c.int(dtype))
+    t.atg_cumsum_(&out, self, dim, i32(dtype))
     return self
 }
 
@@ -3653,7 +3569,7 @@ elu_backward_grad_input :: proc(
         &out, 
         grad_input, grad_output, 
         alpha, scale, input_scale, 
-        c.int(1) if is_result else c.int(0), 
+        i32(1) if is_result else i32(0), 
         self_or_result,
     )
     return track(out)
@@ -3669,8 +3585,8 @@ embedding_backward :: proc(
     out: Tensor
     t.atg_embedding_backward(
         &out, grad, indices, num_weights, padding_idx, 
-        c.int(1) if scale_grad_by_freq else c.int(0), 
-        c.int(1) if sparse else c.int(0),
+        i32(1) if scale_grad_by_freq else i32(0), 
+        i32(1) if sparse else i32(0),
     )
     return track(out)
 }
@@ -3684,7 +3600,7 @@ embedding_dense_backward :: proc(
     out: Tensor
     t.atg_embedding_dense_backward(
         &out, grad_output, indices, num_weights, padding_idx, 
-        c.int(1) if scale_grad_by_freq else c.int(0),
+        i32(1) if scale_grad_by_freq else i32(0),
     )
     return track(out)
 }
@@ -3698,7 +3614,7 @@ embedding_sparse_backward :: proc(
     out: Tensor
     t.atg_embedding_sparse_backward(
         &out, grad, indices, num_weights, padding_idx, 
-        c.int(1) if scale_grad_by_freq else c.int(0),
+        i32(1) if scale_grad_by_freq else i32(0),
     )
     return track(out)
 }
@@ -3726,25 +3642,25 @@ elu_ :: proc(self: Tensor) -> Tensor {
 // Feature Dropout (often distinct from standard dropout in how it handles channels)
 feature_dropout :: proc(input: Tensor, p: f64, train: bool) -> Tensor {
     out: Tensor
-    t.atg_feature_dropout(&out, input, p, c.int(1) if train else c.int(0))
+    t.atg_feature_dropout(&out, input, p, i32(1) if train else i32(0))
     return track(out)
 }
 
 feature_dropout_ :: proc(self: Tensor, p: f64, train: bool) -> Tensor {
     out: Tensor
-    t.atg_feature_dropout_(&out, self, p, c.int(1) if train else c.int(0))
+    t.atg_feature_dropout_(&out, self, p, i32(1) if train else i32(0))
     return self
 }
 
 feature_alpha_dropout :: proc(input: Tensor, p: f64, train: bool) -> Tensor {
     out: Tensor
-    t.atg_feature_alpha_dropout(&out, input, p, c.int(1) if train else c.int(0))
+    t.atg_feature_alpha_dropout(&out, input, p, i32(1) if train else i32(0))
     return track(out)
 }
 
 feature_alpha_dropout_ :: proc(self: Tensor, p: f64, train: bool) -> Tensor {
     out: Tensor
-    t.atg_feature_alpha_dropout_(&out, self, p, c.int(1) if train else c.int(0))
+    t.atg_feature_alpha_dropout_(&out, self, p, i32(1) if train else i32(0))
     return self
 }
 
@@ -3762,7 +3678,7 @@ cudnn_batch_norm :: proc(
         &out, 
         input, weight, bias, 
         running_mean, running_var, 
-        c.int(1) if training else c.int(0),
+        i32(1) if training else i32(0),
         exponential_average_factor, 
         epsilon,
     )
@@ -3802,7 +3718,7 @@ diff :: proc(
 
 cumulative_trapezoid :: proc(y: Tensor, x: Tensor = Tensor{}, dim: i64 = -1) -> Tensor {
     out: Tensor
-    // If x is defined, use the _x variant, otherwise the standard one
+    // If x is defined, use the _x variant, otherwise standard one
     if defined(x) != 0 {
         t.atg_cumulative_trapezoid_x(&out, y, x, dim)
     } else {
@@ -3811,7 +3727,7 @@ cumulative_trapezoid :: proc(y: Tensor, x: Tensor = Tensor{}, dim: i64 = -1) -> 
     return track(out)
 }
 
-// Quantization (used in QAT - Quantization Aware Training)
+// Quantization used in QAT - Quantization Aware Training
 dequantize :: proc(self: Tensor) -> Tensor {
     out: Tensor
     t.atg_dequantize(&out, self)
@@ -3851,9 +3767,9 @@ empty_strided :: proc(
     out: Tensor
     t.atg_empty_strided(
         &out, 
-        raw_data(size), c.int(len(size)), 
-        raw_data(stride), c.int(len(stride)), 
-        c.int(options_kind), c.int(options_device),
+        raw_data(size), i32(len(size)), 
+        raw_data(stride), i32(len(stride)), 
+        i32(options_kind), i32(options_device),
     )
     return track(out)
 }
@@ -3867,9 +3783,9 @@ empty_permuted :: proc(
     out: Tensor
     t.atg_empty_permuted(
         &out, 
-        raw_data(size), c.int(len(size)), 
-        raw_data(physical_layout), c.int(len(physical_layout)), 
-        c.int(options_kind), c.int(options_device),
+        raw_data(size), i32(len(size)), 
+        raw_data(physical_layout), i32(len(physical_layout)), 
+        i32(options_kind), i32(options_device),
     )
     return track(out)
 }
@@ -3887,9 +3803,9 @@ convolution_relu :: proc(
     t.atg_cudnn_convolution_relu(
         &out,
         self, weight, bias,
-        raw_data(stride), c.int(len(stride)),
-        raw_data(padding), c.int(len(padding)),
-        raw_data(dilation), c.int(len(dilation)),
+        raw_data(stride), i32(len(stride)),
+        raw_data(padding), i32(len(padding)),
+        raw_data(dilation), i32(len(dilation)),
         groups,
     )
     return track(out)
@@ -3910,9 +3826,9 @@ convolution_add_relu :: proc(
         self, weight, z,
         alpha,
         bias,
-        raw_data(stride), c.int(len(stride)),
-        raw_data(padding), c.int(len(padding)),
-        raw_data(dilation), c.int(len(dilation)),
+        raw_data(stride), i32(len(stride)),
+        raw_data(padding), i32(len(padding)),
+        raw_data(dilation), i32(len(dilation)),
         groups,
     )
     return track(out)
@@ -3933,19 +3849,20 @@ convolution_transpose :: proc(
     t.atg_cudnn_convolution_transpose(
         &out,
         self, weight,
-        raw_data(padding), c.int(len(padding)),
-        raw_data(output_padding), c.int(len(output_padding)),
-        raw_data(stride), c.int(len(stride)),
-        raw_data(dilation), c.int(len(dilation)),
+        raw_data(padding), i32(len(padding)),
+        raw_data(output_padding), i32(len(output_padding)),
+        raw_data(stride), i32(len(stride)),
+        raw_data(dilation), i32(len(dilation)),
         groups,
-        c.int(1) if benchmark else c.int(0),
-        c.int(1) if deterministic else c.int(0),
-        c.int(1) if allow_tf32 else c.int(0),
+        i32(1) if benchmark else i32(0),
+        i32(1) if deterministic else i32(0),
+        i32(1) if allow_tf32 else i32(0),
     )
     return track(out)
 }
 
-// Matrix & Diagonal Operations
+// Matrix & Diagonal Ops
+
 diag_embed :: proc(self: Tensor, offset: i64 = 0, dim1: i64 = -2, dim2: i64 = -1) -> Tensor {
     out: Tensor
     t.atg_diag_embed(&out, self, offset, dim1, dim2)
@@ -4027,6 +3944,7 @@ erfinv_ :: proc(self: Tensor) -> Tensor {
 }
 
 // Random Sampling
+
 exponential :: proc(self: Tensor, lambd: f64 = 1.0) -> Tensor {
     out: Tensor
     t.atg_exponential(&out, self, lambd)
@@ -4039,7 +3957,7 @@ exponential_ :: proc(self: Tensor, lambd: f64 = 1.0) -> Tensor {
     return self
 }
 
-// Divide (Aliases)
+// DIVISION
 
 divide :: proc{
     divide_tensor, 
@@ -4070,14 +3988,14 @@ divide_scalar :: proc(self: Tensor, other: Scalar) -> Tensor {
 divide_tensor_mode :: proc(self, other: Tensor, rounding_mode: string) -> Tensor {
     out: Tensor
     mode_cstr := strings.clone_to_cstring(rounding_mode, context.temp_allocator)
-    t.atg_divide_tensor_mode(&out, self, other, mode_cstr, c.int(len(rounding_mode)))
+    t.atg_divide_tensor_mode(&out, self, other, mode_cstr, i32(len(rounding_mode)))
     return track(out)
 }
 
 divide_scalar_mode :: proc(self: Tensor, other: Scalar, rounding_mode: string) -> Tensor {
     out: Tensor
     mode_cstr := strings.clone_to_cstring(rounding_mode, context.temp_allocator)
-    t.atg_divide_scalar_mode(&out, self, other, mode_cstr, c.int(len(rounding_mode)))
+    t.atg_divide_scalar_mode(&out, self, other, mode_cstr, i32(len(rounding_mode)))
     return track(out)
 }
 
@@ -4096,18 +4014,18 @@ divide_scalar_ :: proc(self: Tensor, other: Scalar) -> Tensor {
 divide_tensor_mode_ :: proc(self, other: Tensor, rounding_mode: string) -> Tensor {
     out: Tensor
     mode_cstr := strings.clone_to_cstring(rounding_mode, context.temp_allocator)
-    t.atg_divide_tensor_mode_(&out, self, other, mode_cstr, c.int(len(rounding_mode)))
+    t.atg_divide_tensor_mode_(&out, self, other, mode_cstr, i32(len(rounding_mode)))
     return self
 }
 
 divide_scalar_mode_ :: proc(self: Tensor, other: Scalar, rounding_mode: string) -> Tensor {
     out: Tensor
     mode_cstr := strings.clone_to_cstring(rounding_mode, context.temp_allocator)
-    t.atg_divide_scalar_mode_(&out, self, other, mode_cstr, c.int(len(rounding_mode)))
+    t.atg_divide_scalar_mode_(&out, self, other, mode_cstr, i32(len(rounding_mode)))
     return self
 }
 
-// Returns the underlying data tensor (detached from autograd history usually)
+// Returns the underlying data tensor
 tensor_data :: proc(self: Tensor) -> Tensor {
     out: Tensor
     t.atg_data(&out, self)
@@ -4123,10 +4041,10 @@ empty_quantized :: proc(
     out: Tensor
     t.atg_empty_quantized(
         &out, 
-        raw_data(size), c.int(len(size)), 
+        raw_data(size), i32(len(size)), 
         qtensor,
-        c.int(options_kind), 
-        c.int(options_device),
+        i32(options_kind), 
+        i32(options_device),
     )
     return track(out)
 }
@@ -4164,7 +4082,7 @@ cudnn_grid_sampler_backward :: proc(self, grid, grad_output: Tensor) -> Tensor {
     return track(out)
 }
 
-// Note: elu_backward takes "is_result" (boolean as int) indicating if self_or_result is the output or input
+// NOTE: elu_backward takes "is_result" (boolean as int) indicating if self_or_result is the output or input
 elu_backward :: proc(
     grad_output: Tensor, 
     alpha, scale, input_scale: Scalar, 
@@ -4176,7 +4094,7 @@ elu_backward :: proc(
         &out, 
         grad_output, 
         alpha, scale, input_scale, 
-        c.int(1) if is_result else c.int(0), 
+        i32(1) if is_result else i32(0), 
         self_or_result,
     )
     return track(out)
@@ -4193,13 +4111,13 @@ diagonal_backward :: proc(
     t.atg_diagonal_backward(
         &out, 
         grad_output, 
-        raw_data(input_sizes), c.int(len(input_sizes)), 
+        raw_data(input_sizes), i32(len(input_sizes)), 
         offset, dim1, dim2,
     )
     return track(out)
 }
 
-// Copy & Expand Utilities
+// Copy & Expand
 
 detach_copy :: proc(self: Tensor) -> Tensor {
     out: Tensor
@@ -4218,8 +4136,8 @@ expand_copy :: proc(self: Tensor, size: []i64, implicit: bool = false) -> Tensor
     t.atg_expand_copy(
         &out, 
         self, 
-        raw_data(size), c.int(len(size)), 
-        c.int(1) if implicit else c.int(0),
+        raw_data(size), i32(len(size)), 
+        i32(1) if implicit else i32(0),
     )
     return track(out)
 }
@@ -4239,15 +4157,15 @@ _fft_n_args :: proc(n: Maybe(i64)) -> (val: i64, null_ptr: rawptr) {
     return 0, &dummy
 }
 
-// Helper to handle string normalization args ("forward", "backward", "ortho")
+// TODO: handle string normalization args ("forward", "backward", "ortho")
 @(private)
-_fft_norm_args :: proc(norm: string) -> (cstring, c.int) {
+_fft_norm_args :: proc(norm: string) -> (cstring, i32) {
     if len(norm) == 0 { return nil, 0 }
     // Unsafe is okay here because the C call is synchronous and copies if needed
-    return strings.unsafe_string_to_cstring(norm), c.int(len(norm))
+    return strings.unsafe_string_to_cstring(norm), i32(len(norm))
 }
 
-//  1D FFT ---
+//  1D FFT
 
 fft :: proc(self: Tensor, n: Maybe(i64) = nil, dim: i64 = -1, norm: string = "") -> Tensor {
     out: Tensor
@@ -4303,7 +4221,7 @@ ihfft :: proc(self: Tensor, n: Maybe(i64) = nil, dim: i64 = -1, norm: string = "
     return track(out)
 }
 
-//  2D FFT ---
+//  2D FFT
 
 fft2 :: proc(self: Tensor, s: []i64 = nil, dim: []i64 = nil, norm: string = "") -> Tensor {
     out: Tensor
@@ -4311,9 +4229,9 @@ fft2 :: proc(self: Tensor, s: []i64 = nil, dim: []i64 = nil, norm: string = "") 
     
     // Default handles for nil slices
     s_ptr := raw_data(s)
-    s_len := c.int(len(s))
+    s_len := i32(len(s))
     dim_ptr := raw_data(dim)
-    dim_len := c.int(len(dim))
+    dim_len := i32(len(dim))
 
     t.atg_fft_fft2(&out, self, s_ptr, s_len, dim_ptr, dim_len, norm_ptr, norm_len)
     return track(out)
@@ -4323,7 +4241,7 @@ ifft2 :: proc(self: Tensor, s: []i64 = nil, dim: []i64 = nil, norm: string = "")
     out: Tensor
     norm_ptr, norm_len := _fft_norm_args(norm)
     
-    t.atg_fft_ifft2(&out, self, raw_data(s), c.int(len(s)), raw_data(dim), c.int(len(dim)), norm_ptr, norm_len)
+    t.atg_fft_ifft2(&out, self, raw_data(s), i32(len(s)), raw_data(dim), i32(len(dim)), norm_ptr, norm_len)
     return track(out)
 }
 
@@ -4331,7 +4249,7 @@ rfft2 :: proc(self: Tensor, s: []i64 = nil, dim: []i64 = nil, norm: string = "")
     out: Tensor
     norm_ptr, norm_len := _fft_norm_args(norm)
 
-    t.atg_fft_rfft2(&out, self, raw_data(s), c.int(len(s)), raw_data(dim), c.int(len(dim)), norm_ptr, norm_len)
+    t.atg_fft_rfft2(&out, self, raw_data(s), i32(len(s)), raw_data(dim), i32(len(dim)), norm_ptr, norm_len)
     return track(out)
 }
 
@@ -4339,7 +4257,7 @@ irfft2 :: proc(self: Tensor, s: []i64 = nil, dim: []i64 = nil, norm: string = ""
     out: Tensor
     norm_ptr, norm_len := _fft_norm_args(norm)
 
-    t.atg_fft_irfft2(&out, self, raw_data(s), c.int(len(s)), raw_data(dim), c.int(len(dim)), norm_ptr, norm_len)
+    t.atg_fft_irfft2(&out, self, raw_data(s), i32(len(s)), raw_data(dim), i32(len(dim)), norm_ptr, norm_len)
     return track(out)
 }
 
@@ -4347,7 +4265,7 @@ hfft2 :: proc(self: Tensor, s: []i64 = nil, dim: []i64 = nil, norm: string = "")
     out: Tensor
     norm_ptr, norm_len := _fft_norm_args(norm)
 
-    t.atg_fft_hfft2(&out, self, raw_data(s), c.int(len(s)), raw_data(dim), c.int(len(dim)), norm_ptr, norm_len)
+    t.atg_fft_hfft2(&out, self, raw_data(s), i32(len(s)), raw_data(dim), i32(len(dim)), norm_ptr, norm_len)
     return track(out)
 }
 
@@ -4355,17 +4273,17 @@ ihfft2 :: proc(self: Tensor, s: []i64 = nil, dim: []i64 = nil, norm: string = ""
     out: Tensor
     norm_ptr, norm_len := _fft_norm_args(norm)
 
-    t.atg_fft_ihfft2(&out, self, raw_data(s), c.int(len(s)), raw_data(dim), c.int(len(dim)), norm_ptr, norm_len)
+    t.atg_fft_ihfft2(&out, self, raw_data(s), i32(len(s)), raw_data(dim), i32(len(dim)), norm_ptr, norm_len)
     return track(out)
 }
 
-//  N-Dimensional FFT ---
+//  N-Dimensional FFT
 
 fftn :: proc(self: Tensor, s: []i64 = nil, dim: []i64 = nil, norm: string = "") -> Tensor {
     out: Tensor
     norm_ptr, norm_len := _fft_norm_args(norm)
 
-    t.atg_fft_fftn(&out, self, raw_data(s), c.int(len(s)), raw_data(dim), c.int(len(dim)), norm_ptr, norm_len)
+    t.atg_fft_fftn(&out, self, raw_data(s), i32(len(s)), raw_data(dim), i32(len(dim)), norm_ptr, norm_len)
     return track(out)
 }
 
@@ -4373,7 +4291,7 @@ ifftn :: proc(self: Tensor, s: []i64 = nil, dim: []i64 = nil, norm: string = "")
     out: Tensor
     norm_ptr, norm_len := _fft_norm_args(norm)
 
-    t.atg_fft_ifftn(&out, self, raw_data(s), c.int(len(s)), raw_data(dim), c.int(len(dim)), norm_ptr, norm_len)
+    t.atg_fft_ifftn(&out, self, raw_data(s), i32(len(s)), raw_data(dim), i32(len(dim)), norm_ptr, norm_len)
     return track(out)
 }
 
@@ -4381,7 +4299,7 @@ rfftn :: proc(self: Tensor, s: []i64 = nil, dim: []i64 = nil, norm: string = "")
     out: Tensor
     norm_ptr, norm_len := _fft_norm_args(norm)
 
-    t.atg_fft_rfftn(&out, self, raw_data(s), c.int(len(s)), raw_data(dim), c.int(len(dim)), norm_ptr, norm_len)
+    t.atg_fft_rfftn(&out, self, raw_data(s), i32(len(s)), raw_data(dim), i32(len(dim)), norm_ptr, norm_len)
     return track(out)
 }
 
@@ -4389,7 +4307,7 @@ irfftn :: proc(self: Tensor, s: []i64 = nil, dim: []i64 = nil, norm: string = ""
     out: Tensor
     norm_ptr, norm_len := _fft_norm_args(norm)
 
-    t.atg_fft_irfftn(&out, self, raw_data(s), c.int(len(s)), raw_data(dim), c.int(len(dim)), norm_ptr, norm_len)
+    t.atg_fft_irfftn(&out, self, raw_data(s), i32(len(s)), raw_data(dim), i32(len(dim)), norm_ptr, norm_len)
     return track(out)
 }
 
@@ -4397,7 +4315,7 @@ hfftn :: proc(self: Tensor, s: []i64 = nil, dim: []i64 = nil, norm: string = "")
     out: Tensor
     norm_ptr, norm_len := _fft_norm_args(norm)
 
-    t.atg_fft_hfftn(&out, self, raw_data(s), c.int(len(s)), raw_data(dim), c.int(len(dim)), norm_ptr, norm_len)
+    t.atg_fft_hfftn(&out, self, raw_data(s), i32(len(s)), raw_data(dim), i32(len(dim)), norm_ptr, norm_len)
     return track(out)
 }
 
@@ -4405,35 +4323,31 @@ ihfftn :: proc(self: Tensor, s: []i64 = nil, dim: []i64 = nil, norm: string = ""
     out: Tensor
     norm_ptr, norm_len := _fft_norm_args(norm)
 
-    t.atg_fft_ihfftn(&out, self, raw_data(s), c.int(len(s)), raw_data(dim), c.int(len(dim)), norm_ptr, norm_len)
+    t.atg_fft_ihfftn(&out, self, raw_data(s), i32(len(s)), raw_data(dim), i32(len(dim)), norm_ptr, norm_len)
     return track(out)
 }
 
-//  FFT Helpers (Shift & Freq) ---
-
 fftshift :: proc(self: Tensor, dim: []i64 = nil) -> Tensor {
     out: Tensor
-    t.atg_fft_fftshift(&out, self, raw_data(dim), c.int(len(dim)))
+    t.atg_fft_fftshift(&out, self, raw_data(dim), i32(len(dim)))
     return track(out)
 }
 
 ifftshift :: proc(self: Tensor, dim: []i64 = nil) -> Tensor {
     out: Tensor
-    t.atg_fft_ifftshift(&out, self, raw_data(dim), c.int(len(dim)))
+    t.atg_fft_ifftshift(&out, self, raw_data(dim), i32(len(dim)))
     return track(out)
 }
 
-// Note: For options_kind, pass a ScalarType (e.g. i32(ScalarType.Float)).
-// For options_device, pass a generic c.int (e.g. 0 for CPU, 1 for CUDA, depending on C++ impl).
 fftfreq :: proc(n: i64, d: f64 = 1.0, dtype: ScalarType = .Float, device: i32 = 0) -> Tensor {
     out: Tensor
-    t.atg_fft_fftfreq(&out, n, d, c.int(dtype), c.int(device))
+    t.atg_fft_fftfreq(&out, n, d, i32(dtype), i32(device))
     return track(out)
 }
 
 rfftfreq :: proc(n: i64, d: f64 = 1.0, dtype: ScalarType = .Float, device: i32 = 0) -> Tensor {
     out: Tensor
-    t.atg_fft_rfftfreq(&out, n, d, c.int(dtype), c.int(device))
+    t.atg_fft_rfftfreq(&out, n, d, i32(dtype), i32(device))
     return track(out)
 }
 
@@ -4475,7 +4389,7 @@ fill_tensor_ :: proc(self: Tensor, value: Tensor) -> Tensor {
 
 fill_diagonal_ :: proc(self: Tensor, fill_value: Scalar, wrap: bool = false) -> Tensor {
     out: Tensor
-    wrap_int := c.int(1) if wrap else c.int(0)
+    wrap_int := i32(1) if wrap else i32(0)
     t.atg_fill_diagonal_(&out, self, fill_value, wrap_int)
     return self
 }
@@ -4496,18 +4410,17 @@ flatten :: proc(self: Tensor, start_dim: i64 = 0, end_dim: i64 = -1) -> Tensor {
 
 flatten_dense_tensors :: proc(tensors: []Tensor) -> Tensor {
     out: Tensor
-    // We pass the raw data of the slice and its length cast to c.int
     t.atg_flatten_dense_tensors(
         &out, 
         raw_data(tensors), 
-        c.int(len(tensors)),
+        i32(len(tensors)),
     )
     return track(out)
 }
 
 flip :: proc(self: Tensor, dims: []i64) -> Tensor {
     out: Tensor
-    t.atg_flip(&out, self, raw_data(dims), c.int(len(dims)))
+    t.atg_flip(&out, self, raw_data(dims), i32(len(dims)))
     return track(out)
 }
 
@@ -4525,7 +4438,6 @@ flipud :: proc(self: Tensor) -> Tensor {
 
 // POWER
 
-// FLOAT POWER
 float_power :: proc{
     float_power_tensor, 
     float_power_scalar_base, // scalar ^ tensor
@@ -4543,14 +4455,14 @@ float_power_tensor :: proc(self: Tensor, exponent: Tensor) -> Tensor {
     return track(out)
 }
 
-// self = base ^ exponent (where base is scalar)
+// self = base ^ exponent where base is scalar
 float_power_scalar_base :: proc(base: Scalar, exponent: Tensor) -> Tensor {
     out: Tensor
     t.atg_float_power_scalar(&out, base, exponent)
     return track(out)
 }
 
-// self = self ^ exponent (where exponent is scalar)
+// self = self ^ exponent where exponent is scalar
 float_power_tensor_exp_scalar :: proc(self: Tensor, exponent: Scalar) -> Tensor {
     out: Tensor
     t.atg_float_power_tensor_scalar(&out, self, exponent)
@@ -4584,8 +4496,6 @@ floor_ :: proc(self: Tensor) -> Tensor {
     return self
 }
 
-// FLOOR DIVIDE
-
 floor_divide :: proc{floor_divide_tensor, floor_divide_scalar}
 floor_divide_ :: proc{floor_divide_tensor_, floor_divide_scalar_}
 
@@ -4613,8 +4523,6 @@ floor_divide_scalar_ :: proc(self: Tensor, other: Scalar) -> Tensor {
     return self
 }
 
-// FMAX / FMIN
-
 fmax :: proc(self: Tensor, other: Tensor) -> Tensor {
     out: Tensor
     t.atg_fmax(&out, self, other)
@@ -4626,8 +4534,6 @@ fmin :: proc(self: Tensor, other: Tensor) -> Tensor {
     t.atg_fmin(&out, self, other)
     return track(out)
 }
-
-// FMOD
 
 fmod :: proc{fmod_tensor, fmod_scalar}
 fmod_ :: proc{fmod_tensor_, fmod_scalar_}
@@ -4656,8 +4562,6 @@ fmod_scalar_ :: proc(self: Tensor, other: Scalar) -> Tensor {
     return self
 }
 
-// FRAC
-
 frac :: proc(self: Tensor) -> Tensor {
     out: Tensor
     t.atg_frac(&out, self)
@@ -4678,7 +4582,7 @@ fractional_max_pool2d :: proc(
     output_size: []i64, 
     random_samples: Tensor
 ) -> (output: Tensor, indices: Tensor) {
-    // Pre-allocate tracked tensors to hold the results
+    // Pre-allocate tracked tensors to hold results
     output = new_tensor()
     indices = new_tensor()
     
@@ -4688,8 +4592,8 @@ fractional_max_pool2d :: proc(
         output,
         indices,
         self,
-        raw_data(kernel_size), c.int(len(kernel_size)),
-        raw_data(output_size), c.int(len(output_size)),
+        raw_data(kernel_size), i32(len(kernel_size)),
+        raw_data(output_size), i32(len(output_size)),
         random_samples,
     )
     return output, indices
@@ -4702,7 +4606,7 @@ fractional_max_pool2d_backward :: proc(
     output_size: []i64,
     indices: Tensor,
 ) -> Tensor {
-    // Uses the explicitly named grad_input version for clarity
+    // Use named grad_input version for clarity
     grad_input := new_tensor()
     
     dummy: Tensor
@@ -4711,8 +4615,8 @@ fractional_max_pool2d_backward :: proc(
         grad_input,
         grad_output,
         self,
-        raw_data(kernel_size), c.int(len(kernel_size)),
-        raw_data(output_size), c.int(len(output_size)),
+        raw_data(kernel_size), i32(len(kernel_size)),
+        raw_data(output_size), i32(len(output_size)),
         indices,
     )
     return grad_input
@@ -4735,8 +4639,8 @@ fractional_max_pool3d :: proc(
         output,
         indices,
         self,
-        raw_data(kernel_size), c.int(len(kernel_size)),
-        raw_data(output_size), c.int(len(output_size)),
+        raw_data(kernel_size), i32(len(kernel_size)),
+        raw_data(output_size), i32(len(output_size)),
         random_samples,
     )
     return output, indices
@@ -4757,8 +4661,8 @@ fractional_max_pool3d_backward :: proc(
         grad_input,
         grad_output,
         self,
-        raw_data(kernel_size), c.int(len(kernel_size)),
-        raw_data(output_size), c.int(len(output_size)),
+        raw_data(kernel_size), i32(len(kernel_size)),
+        raw_data(output_size), i32(len(output_size)),
         indices,
     )
     return grad_input
@@ -4784,7 +4688,7 @@ gcd_tensor_ :: proc(self, other: Tensor) -> Tensor {
     return self
 }
 
-geometric_new :: proc(self: Tensor, p: f64) -> Tensor {
+geometric:: proc(self: Tensor, p: f64) -> Tensor {
     out: Tensor
     t.atg_geometric(&out, self, p)
     return track(out)
@@ -4800,11 +4704,11 @@ geometric_ :: proc(self: Tensor, p: f64) -> Tensor {
 
 frobenius_norm :: proc(self: Tensor, dim: []i64 = nil, keepdim: bool = false) -> Tensor {
     out: Tensor
-    keep_int := c.int(1) if keepdim else c.int(0)
+    keep_int := i32(1) if keepdim else i32(0)
     
     // Handle nil slice safely
     dim_ptr := raw_data(dim)
-    dim_len := c.int(len(dim))
+    dim_len := i32(len(dim))
     
     t.atg_frobenius_norm(&out, self, dim_ptr, dim_len, keep_int)
     return track(out)
@@ -4819,8 +4723,8 @@ geqrf :: proc(self: Tensor) -> Tensor {
 
 // Out-param version using specific a/tau buffers
 geqrf_out :: proc(self: Tensor, a_out: Tensor, tau_out: Tensor) -> (Tensor, Tensor) {
-    out: Tensor // Dummy return handle often used in these C-wrappers
-    t.atg_geqrf_a(&out, a_out, tau_out, self)
+    dummy: Tensor
+    t.atg_geqrf_a(&dummy, a_out, tau_out, self)
     return a_out, tau_out
 }
 
@@ -4841,17 +4745,17 @@ from_file :: proc(
 ) -> Tensor {
     out: Tensor
     c_filename := strings.clone_to_cstring(filename, context.temp_allocator)
-    shared_int := c.int(1) if shared else c.int(0)
+    shared_int := i32(1) if shared else i32(0)
     
     t.atg_from_file(
         &out, 
         c_filename, 
-        c.int(len(filename)), 
+        i32(len(filename)), 
         shared_int, 
         size, 
         nil, 
-        c.int(options_kind), 
-        c.int(options_device),
+        i32(options_kind), 
+        i32(options_device),
     )
     return track(out)
 }
@@ -4861,10 +4765,10 @@ full :: proc(size: []i64, fill_value: Scalar, options_kind: i32 = 0, options_dev
     t.atg_full(
         &out, 
         raw_data(size), 
-        c.int(len(size)), 
+        i32(len(size)), 
         fill_value, 
-        c.int(options_kind), 
-        c.int(options_device),
+        i32(options_kind), 
+        i32(options_device),
     )
     return track(out)
 }
@@ -4879,14 +4783,14 @@ full_like :: proc(self: Tensor, fill_value: Scalar) -> Tensor {
 
 gather :: proc(self: Tensor, dim: i64, index: Tensor, sparse_grad: bool = false) -> Tensor {
     out: Tensor
-    sparse_int := c.int(1) if sparse_grad else c.int(0)
+    sparse_int := i32(1) if sparse_grad else i32(0)
     t.atg_gather(&out, self, dim, index, sparse_int)
     return track(out)
 }
 
 gather_backward :: proc(grad: Tensor, self: Tensor, dim: i64, index: Tensor, sparse_grad: bool = false) -> Tensor {
     out: Tensor
-    sparse_int := c.int(1) if sparse_grad else c.int(0)
+    sparse_int := i32(1) if sparse_grad else i32(0)
     t.atg_gather_backward(&out, grad, self, dim, index, sparse_int)
     return track(out)
 }
@@ -4924,31 +4828,31 @@ ge_tensor_ :: proc(self: Tensor, other: Tensor) -> Tensor {
 
 // approximate: "none" or "tanh"
 
-gelu_new :: proc(self: Tensor, approximate: string = "none") -> Tensor {
+gelu:: proc(self: Tensor, approximate: string = "none") -> Tensor {
     out: Tensor
     c_approx := strings.clone_to_cstring(approximate, context.temp_allocator)
-    t.atg_gelu(&out, self, c_approx, c.int(len(approximate)))
+    t.atg_gelu(&out, self, c_approx, i32(len(approximate)))
     return track(out)
 }
 
 gelu_ :: proc(self: Tensor, approximate: string = "none") -> Tensor {
     out: Tensor
     c_approx := strings.clone_to_cstring(approximate, context.temp_allocator)
-    t.atg_gelu_(&out, self, c_approx, c.int(len(approximate)))
+    t.atg_gelu_(&out, self, c_approx, i32(len(approximate)))
     return self
 }
 
 gelu_backward :: proc(grad_output: Tensor, self: Tensor, approximate: string = "none") -> Tensor {
     out: Tensor
     c_approx := strings.clone_to_cstring(approximate, context.temp_allocator)
-    t.atg_gelu_backward(&out, grad_output, self, c_approx, c.int(len(approximate)))
+    t.atg_gelu_backward(&out, grad_output, self, c_approx, i32(len(approximate)))
     return track(out)
 }
 
 gelu_backward_grad_input :: proc(grad_input: Tensor, grad_output: Tensor, self: Tensor, approximate: string = "none") -> Tensor {
     out: Tensor
     c_approx := strings.clone_to_cstring(approximate, context.temp_allocator)
-    t.atg_gelu_backward_grad_input(&out, grad_input, grad_output, self, c_approx, c.int(len(approximate)))
+    t.atg_gelu_backward_grad_input(&out, grad_input, grad_output, self, c_approx, i32(len(approximate)))
     return track(out)
 }
 
@@ -5005,8 +4909,8 @@ fused_moving_avg_obs_fake_quant :: proc(
     symmetric_quant: bool = false
 ) -> Tensor {
     out: Tensor
-    per_row_int := c.int(1) if per_row_fake_quant else c.int(0)
-    sym_int := c.int(1) if symmetric_quant else c.int(0)
+    per_row_int := i32(1) if per_row_fake_quant else i32(0)
+    sym_int := i32(1) if symmetric_quant else i32(0)
 
     t.atg_fused_moving_avg_obs_fake_quant(
         &out,
@@ -5035,14 +4939,14 @@ grad :: proc(self: Tensor) -> Tensor {
 
 // HARDSHRINK
 
-// Forward: The binding provided does not accept a lambda argument.
+// Forward: The binding provided does not accept a lambda argument
 hardshrink :: proc(self: Tensor) -> Tensor {
     out: Tensor
     t.atg_hardshrink(&out, self)
     return track(out)
 }
 
-// Backward: The binding requires 'lambd'.
+// Backward: The binding requires 'lambd'
 hardshrink_backward :: proc(grad_out: Tensor, self: Tensor, lambd: Scalar) -> Tensor {
     out: Tensor
     t.atg_hardshrink_backward(&out, grad_out, self, lambd)
@@ -5134,12 +5038,12 @@ heaviside_ :: proc(self: Tensor, values: Tensor) -> Tensor {
 
 hash_tensor :: proc(self: Tensor, dim: []i64, keepdim: bool, mode: i64) -> Tensor {
     out: Tensor
-    keep_int := c.int(1) if keepdim else c.int(0)
+    keep_int := i32(1) if keepdim else i32(0)
     t.atg_hash_tensor(
         &out, 
         self, 
         raw_data(dim), 
-        c.int(len(dim)), 
+        i32(len(dim)), 
         keep_int, 
         mode,
     )
@@ -5154,21 +5058,22 @@ histc :: proc(self: Tensor, bins: i64) -> Tensor {
 
 histogram :: proc(self: Tensor, bins: Tensor, weight: Tensor = {}, density: bool = false) -> Tensor {
     out: Tensor
-    dens_int := c.int(1) if density else c.int(0)
+    dens_int := i32(1) if density else i32(0)
     t.atg_histogram(&out, self, bins, weight, dens_int)
     return track(out)
 }
 
 // Wrapper for atg_histogram_bin_ct
+
 histogram_range :: proc(self: Tensor, bins: i64, range: []f64, weight: Tensor = {}, density: bool = false) -> Tensor {
     out: Tensor
-    dens_int := c.int(1) if density else c.int(0)
+    dens_int := i32(1) if density else i32(0)
     t.atg_histogram_bin_ct(
         &out, 
         self, 
         bins, 
         raw_data(range), 
-        c.int(len(range)), 
+        i32(len(range)), 
         weight, 
         dens_int,
     )
@@ -5205,7 +5110,7 @@ hspmm :: proc(mat1: Tensor, mat2: Tensor) -> Tensor {
 
 hstack :: proc(tensors: []Tensor) -> Tensor {
     out: Tensor
-    t.atg_hstack(&out, raw_data(tensors), c.int(len(tensors)))
+    t.atg_hstack(&out, raw_data(tensors), i32(len(tensors)))
     return track(out)
 }
 
@@ -5269,7 +5174,7 @@ imag :: proc(self: Tensor) -> Tensor {
 
 // Image Manipulation
 
-// im2col (Image to Column)
+// im2col - Image to Column
 im2col :: proc(
     self: Tensor, 
     kernel_size: []i64, 
@@ -5281,19 +5186,19 @@ im2col :: proc(
     t.atg_im2col(
         &out, 
         self, 
-        raw_data(kernel_size), c.int(len(kernel_size)),
-        raw_data(dilation),    c.int(len(dilation)),
-        raw_data(padding),     c.int(len(padding)),
-        raw_data(stride),      c.int(len(stride)),
+        raw_data(kernel_size), i32(len(kernel_size)),
+        raw_data(dilation),    i32(len(dilation)),
+        raw_data(padding),     i32(len(padding)),
+        raw_data(stride),      i32(len(stride)),
     )
     return track(out)
 }
 
 // Indexing & Slicing
-// Indexing (Equivalent to tensor[indices])
+// Indexing - Equivalent to tensor[indices]
 index :: proc(self: Tensor, indices: []Tensor) -> Tensor {
     out: Tensor
-    t.atg_index(&out, self, raw_data(indices), c.int(len(indices)))
+    t.atg_index(&out, self, raw_data(indices), i32(len(indices)))
     return track(out)
 }
 
@@ -5323,7 +5228,7 @@ index_copy_ :: proc(self: Tensor, dim: i64, idx: Tensor, source: Tensor) -> Tens
     return self
 }
 
-// Index Fill (Polyform for Scalar and Tensor values)
+// Index Fill - Polyform for Scalar and Tensor values
 index_fill :: proc{index_fill_scalar, index_fill_tensor}
 index_fill_ :: proc{index_fill_scalar_, index_fill_tensor_}
 
@@ -5351,22 +5256,22 @@ index_fill_tensor_ :: proc(self: Tensor, dim: i64, idx: Tensor, value: Tensor) -
     return self
 }
 
-// Index Put (Equivalent to tensor[indices] = values)
+// Index Put - Equivalent to tensor[indices] = values
 index_put :: proc(self: Tensor, indices: []Tensor, values: Tensor, accumulate: bool = false) -> Tensor {
     out: Tensor
-    acc_int := c.int(1) if accumulate else c.int(0)
-    t.atg_index_put(&out, self, raw_data(indices), c.int(len(indices)), values, acc_int)
+    acc_int := i32(1) if accumulate else i32(0)
+    t.atg_index_put(&out, self, raw_data(indices), i32(len(indices)), values, acc_int)
     return track(out)
 }
 
 index_put_ :: proc(self: Tensor, indices: []Tensor, values: Tensor, accumulate: bool = false) -> Tensor {
     out: Tensor
-    acc_int := c.int(1) if accumulate else c.int(0)
-    t.atg_index_put_(&out, self, raw_data(indices), c.int(len(indices)), values, acc_int)
+    acc_int := i32(1) if accumulate else i32(0)
+    t.atg_index_put_(&out, self, raw_data(indices), i32(len(indices)), values, acc_int)
     return self
 }
 
-// Index Reduce (e.g. "mean", "prod", "amin", "amax")
+// TODO: Index Reduce (eg "mean", "prod", "amin", "amax")
 index_reduce :: proc(
     self: Tensor, 
     dim: i64, 
@@ -5376,12 +5281,11 @@ index_reduce :: proc(
     include_self: bool = false,
 ) -> Tensor {
     out: Tensor
-    incl_int := c.int(1) if include_self else c.int(0)
+    incl_int := i32(1) if include_self else i32(0)
     
-    // Safety: Clone to cstring to ensure null-termination for C API
     c_reduce := strings.clone_to_cstring(reduce, context.temp_allocator)
     
-    t.atg_index_reduce(&out, self, dim, idx, source, c_reduce, c.int(len(reduce)), incl_int)
+    t.atg_index_reduce(&out, self, dim, idx, source, c_reduce, i32(len(reduce)), incl_int)
     return track(out)
 }
 
@@ -5394,10 +5298,10 @@ index_reduce_ :: proc(
     include_self: bool = false,
 ) -> Tensor {
     out: Tensor
-    incl_int := c.int(1) if include_self else c.int(0)
+    incl_int := i32(1) if include_self else i32(0)
     c_reduce := strings.clone_to_cstring(reduce, context.temp_allocator)
     
-    t.atg_index_reduce_(&out, self, dim, idx, source, c_reduce, c.int(len(reduce)), incl_int)
+    t.atg_index_reduce_(&out, self, dim, idx, source, c_reduce, i32(len(reduce)), incl_int)
     return self
 }
 
@@ -5414,7 +5318,7 @@ index_select_backward :: proc(grad: Tensor, self_sizes: []i64, dim: i64, idx: Te
     t.atg_index_select_backward(
         &out, 
         grad, 
-        raw_data(self_sizes), c.int(len(self_sizes)), 
+        raw_data(self_sizes), i32(len(self_sizes)), 
         dim, 
         idx,
     )
@@ -5452,10 +5356,10 @@ instance_norm :: proc(
     t.atg_instance_norm(
         &out, 
         input, weight, bias, running_mean, running_var, 
-        c.int(use_input_stats), 
+        i32(use_input_stats), 
         momentum, 
         eps, 
-        c.int(cudnn_enabled),
+        i32(cudnn_enabled),
     )
     return track(out)
 }
@@ -5474,11 +5378,11 @@ layer_norm :: proc(
         &out, 
         input, 
         raw_data(normalized_shape), 
-        c.int(len(normalized_shape)), 
+        i32(len(normalized_shape)), 
         weight, 
         bias, 
         eps, 
-        c.int(cudnn_enable),
+        i32(cudnn_enable),
     )
     return track(out)
 }
@@ -5486,7 +5390,7 @@ layer_norm :: proc(
 // KL Divergence
 kl_div :: proc(self, target: Tensor, reduction: i64 = 1, log_target: bool = false) -> Tensor {
     out: Tensor
-    t.atg_kl_div(&out, self, target, reduction, c.int(log_target))
+    t.atg_kl_div(&out, self, target, reduction, i32(log_target))
     return track(out)
 }
 
@@ -5528,20 +5432,20 @@ istft :: proc(
     center: bool = true, 
     normalized: bool = false, 
     onesided: bool = true, 
-    length: i64 = -1, // -1 often implies None/Null in wrapper logic if pointer is nil
+    length: i64 = -1, // -1 implies None
     return_complex: bool = false,
 ) -> Tensor {
     out: Tensor
-    // Note: We pass nil to the _null pointers, implying we rely on the _v values provided.
+    // NOTE: pass nil to the _null pointers, implying we rely on the _v values provided
     t.atg_istft(
         &out, self, 
         n_fft, 
         hop_length, nil, 
         win_length, nil, 
         window, 
-        c.int(center), c.int(normalized), c.int(onesided), 
+        i32(center), i32(normalized), i32(onesided), 
         length, nil, 
-        c.int(return_complex),
+        i32(return_complex),
     )
     return track(out)
 }
@@ -5554,7 +5458,7 @@ isclose :: proc(
     equal_nan: bool = false
 ) -> Tensor {
     out: Tensor
-    t.atg_isclose(&out, self, other, rtol, atol, c.int(equal_nan))
+    t.atg_isclose(&out, self, other, rtol, atol, i32(equal_nan))
     return track(out)
 }
 
@@ -5571,19 +5475,19 @@ isin :: proc{isin_tensor_tensor, isin_scalar_tensor, isin_tensor_scalar}
 
 isin_tensor_tensor :: proc(elements, test_elements: Tensor, assume_unique: bool = false, invert: bool = false) -> Tensor {
     out: Tensor
-    t.atg_isin(&out, elements, test_elements, c.int(assume_unique), c.int(invert))
+    t.atg_isin(&out, elements, test_elements, i32(assume_unique), i32(invert))
     return track(out)
 }
 
 isin_scalar_tensor :: proc(element: Scalar, test_elements: Tensor, assume_unique: bool = false, invert: bool = false) -> Tensor {
     out: Tensor
-    t.atg_isin_scalar_tensor(&out, element, test_elements, c.int(assume_unique), c.int(invert))
+    t.atg_isin_scalar_tensor(&out, element, test_elements, i32(assume_unique), i32(invert))
     return track(out)
 }
 
 isin_tensor_scalar :: proc(elements: Tensor, test_element: Scalar, assume_unique: bool = false, invert: bool = false) -> Tensor {
     out: Tensor
-    t.atg_isin_tensor_scalar(&out, elements, test_element, c.int(assume_unique), c.int(invert))
+    t.atg_isin_tensor_scalar(&out, elements, test_element, i32(assume_unique), i32(invert))
     return track(out)
 }
 
@@ -5622,7 +5526,7 @@ kthvalue :: proc(self: Tensor, k: i64, dim: i64 = -1, keepdim: bool = false) -> 
     indices = new_tensor()
     
     dummy: Tensor
-    t.atg_kthvalue_values(&dummy, values, indices, self, k, dim, c.int(keepdim))
+    t.atg_kthvalue_values(&dummy, values, indices, self, k, dim, i32(keepdim))
     
     return values, indices
 }
@@ -5650,7 +5554,7 @@ lcm_in_place :: proc(self, other: Tensor) -> Tensor {
     return self
 }
 
-// LDEXP Group (Load Exponent)
+// LDEXP Group - Load Exponent
 ldexp :: proc{ldexp_out}
 ldexp_ :: proc{ldexp_in_place}
 
@@ -5670,21 +5574,19 @@ kaiser_window :: proc{kaiser_window_simple, kaiser_window_beta, kaiser_window_pe
 
 kaiser_window_simple :: proc(window_length: i64, device: i32 = -1, dtype: i32 = -1) -> Tensor {
     out: Tensor
-    // Note: options_kind / options_device map to tensor options construction in C++, 
-    // passing raw ints if the binding expects raw ints for type/device.
     t.atg_kaiser_window(&out, window_length, dtype, device)
     return track(out)
 }
 
 kaiser_window_beta :: proc(window_length: i64, periodic: bool, beta: f64, device: i32 = -1, dtype: i32 = -1) -> Tensor {
     out: Tensor
-    t.atg_kaiser_window_beta(&out, window_length, c.int(periodic), beta, dtype, device)
+    t.atg_kaiser_window_beta(&out, window_length, i32(periodic), beta, dtype, device)
     return track(out)
 }
 
 kaiser_window_periodic :: proc(window_length: i64, periodic: bool, device: i32 = -1, dtype: i32 = -1) -> Tensor {
     out: Tensor
-    t.atg_kaiser_window_periodic(&out, window_length, c.int(periodic), dtype, device)
+    t.atg_kaiser_window_periodic(&out, window_length, i32(periodic), dtype, device)
     return track(out)
 }
 
@@ -5713,7 +5615,7 @@ leaky_relu_backward :: proc(
     self_is_result: bool
 ) -> Tensor {
     out: Tensor
-    is_res := c.int(1) if self_is_result else c.int(0)
+    is_res := i32(1) if self_is_result else i32(0)
     t.atg_leaky_relu_backward(&out, grad_output, self, negative_slope, is_res)
     return track(out)
 }
@@ -5726,7 +5628,7 @@ leaky_relu_backward_grad_input :: proc(
     self_is_result: bool
 ) -> Tensor {
     out: Tensor
-    is_res := c.int(1) if self_is_result else c.int(0)
+    is_res := i32(1) if self_is_result else i32(0)
     t.atg_leaky_relu_backward_grad_input(&out, grad_input, grad_output, self, negative_slope, is_res)
     return track(out)
 }
@@ -5819,7 +5721,7 @@ less_equal_tensor_ :: proc(self, other: Tensor) -> Tensor {
     return self
 }
 
-// MATH (LGamma)
+// MATH / LGamma
 
 lgamma :: proc(self: Tensor) -> Tensor {
     out: Tensor
@@ -5855,23 +5757,19 @@ lift_fresh_copy :: proc(self: Tensor) -> Tensor {
     return track(out)
 }
 
-//-----------------------------------------------------------------------
-// LINALG NAMESPACE (Linear Algebra)
-//-----------------------------------------------------------------------
-
-//  Cholesky Decomposition ---
+//  Cholesky Decomposition
 
 linalg_cholesky :: proc(self: Tensor, upper: bool = false) -> Tensor {
     out: Tensor
-    t.atg_linalg_cholesky(&out, self, c.int(1) if upper else c.int(0))
+    t.atg_linalg_cholesky(&out, self, i32(1) if upper else i32(0))
     return track(out)
 }
 
 // Returns (L, info) tuple-wrapped in a Tensor, or use explicit variant below
 linalg_cholesky_ex :: proc(self: Tensor, upper: bool = false, check_errors: bool = false) -> Tensor {
     out: Tensor
-    check_int := c.int(1) if check_errors else c.int(0)
-    upper_int := c.int(1) if upper else c.int(0)
+    check_int := i32(1) if check_errors else i32(0)
+    upper_int := i32(1) if upper else i32(0)
     t.atg_linalg_cholesky_ex(&out, self, upper_int, check_int)
     return track(out)
 }
@@ -5881,8 +5779,8 @@ linalg_cholesky_ex_out :: proc(self: Tensor, upper: bool = false, check_errors: 
     L = new_tensor()
     info = new_tensor()
     
-    check_int := c.int(1) if check_errors else c.int(0)
-    upper_int := c.int(1) if upper else c.int(0)
+    check_int := i32(1) if check_errors else i32(0)
+    upper_int := i32(1) if upper else i32(0)
     
     dummy: Tensor
     t.atg_linalg_cholesky_ex_l(&dummy, L, info, self, upper_int, check_int)
@@ -5890,7 +5788,7 @@ linalg_cholesky_ex_out :: proc(self: Tensor, upper: bool = false, check_errors: 
     return L, info
 }
 
-//  Condition Number / Determinant / Norm ---
+//  Condition Number / Determinant / Norm
 
 linalg_cond :: proc(self: Tensor, p: Scalar) -> Tensor {
     out: Tensor
@@ -5901,43 +5799,43 @@ linalg_cond :: proc(self: Tensor, p: Scalar) -> Tensor {
 linalg_cond_str :: proc(self: Tensor, p: string) -> Tensor {
     out: Tensor
     p_cstr := strings.clone_to_cstring(p, context.temp_allocator)
-    t.atg_linalg_cond_p_str(&out, self, p_cstr, c.int(len(p)))
+    t.atg_linalg_cond_p_str(&out, self, p_cstr, i32(len(p)))
     return track(out)
 }
 
 linalg_norm :: proc(self: Tensor, ord: Scalar, dim: []i64 = nil, keepdim: bool = false, dtype: i32 = 6 /*Float*/) -> Tensor {
     out: Tensor
-    keep_int := c.int(1) if keepdim else c.int(0)
+    keep_int := i32(1) if keepdim else i32(0)
     
     // Handle empty slice/nil
     dim_ptr: ^i64 = nil
-    dim_len: c.int = 0
+    dim_len: i32 = 0
     if len(dim) > 0 {
         dim_ptr = raw_data(dim)
-        dim_len = c.int(len(dim))
+        dim_len = i32(len(dim))
     }
 
-    t.atg_linalg_norm(&out, self, ord, dim_ptr, dim_len, keep_int, c.int(dtype))
+    t.atg_linalg_norm(&out, self, ord, dim_ptr, dim_len, keep_int, i32(dtype))
     return track(out)
 }
 
 linalg_norm_str :: proc(self: Tensor, ord: string, dim: []i64 = nil, keepdim: bool = false, dtype: i32 = 6) -> Tensor {
     out: Tensor
     ord_cstr := strings.clone_to_cstring(ord, context.temp_allocator)
-    keep_int := c.int(1) if keepdim else c.int(0)
+    keep_int := i32(1) if keepdim else i32(0)
     
     dim_ptr: ^i64 = nil
-    dim_len: c.int = 0
+    dim_len: i32 = 0
     if len(dim) > 0 {
         dim_ptr = raw_data(dim)
-        dim_len = c.int(len(dim))
+        dim_len = i32(len(dim))
     }
 
-    t.atg_linalg_norm_ord_str(&out, self, ord_cstr, c.int(len(ord)), dim_ptr, dim_len, keep_int, c.int(dtype))
+    t.atg_linalg_norm_ord_str(&out, self, ord_cstr, i32(len(ord)), dim_ptr, dim_len, keep_int, i32(dtype))
     return track(out)
 }
 
-//  Cross / Diagonal / Ops ---
+//  Cross / Diagonal
 
 linalg_cross :: proc(self: Tensor, other: Tensor, dim: i64 = -1) -> Tensor {
     out: Tensor
@@ -5959,7 +5857,7 @@ linalg_matmul :: proc(self, other: Tensor) -> Tensor {
 
 linalg_multi_dot :: proc(tensors: []Tensor) -> Tensor {
     out: Tensor
-    t.atg_linalg_multi_dot(&out, raw_data(tensors), c.int(len(tensors)))
+    t.atg_linalg_multi_dot(&out, raw_data(tensors), i32(len(tensors)))
     return track(out)
 }
 
@@ -5983,14 +5881,12 @@ linalg_matrix_exp :: proc(self: Tensor) -> Tensor {
 
 linalg_vander :: proc(x: Tensor, n: i64 = 0, n_is_none: bool = true) -> Tensor {
     out: Tensor
-    // Handle optional 'n'. If n_is_none is true, we pass a dummy non-null pointer to 'n_null' 
-    // (assuming the generated shim treats non-null n_null arg as "None")
+    // NOTE: optional 'n' if n_is_none is true, we pass a dummy non-null pointer to 'n_null' 
     dummy_val: i32 = 1
     n_null_ptr: rawptr = nil
     if n_is_none {
         n_null_ptr = &dummy_val
     }
-    
     t.atg_linalg_vander(&out, x, n, n_null_ptr)
     return track(out)
 }
@@ -6001,10 +5897,10 @@ linalg_vecdot :: proc(x, y: Tensor, dim: i64 = -1) -> Tensor {
     return track(out)
 }
 
-//  Eigenvalues ---
+//  Eigenvalues
 
+// Returns Tuple(eigenvalues, eigenvectors)
 linalg_eig :: proc(self: Tensor) -> Tensor {
-    // Returns Tuple(eigenvalues, eigenvectors)
     out: Tensor
     t.atg_linalg_eig(&out, self)
     return track(out)
@@ -6016,18 +5912,18 @@ linalg_eigvals :: proc(self: Tensor) -> Tensor {
     return track(out)
 }
 
+// Returns Tuple(eigenvalues, eigenvectors)
 linalg_eigh :: proc(self: Tensor, UPLO: string = "L") -> Tensor {
-    // Returns Tuple(eigenvalues, eigenvectors)
     out: Tensor
     uplo_cstr := strings.clone_to_cstring(UPLO, context.temp_allocator)
-    t.atg_linalg_eigh(&out, self, uplo_cstr, c.int(len(UPLO)))
+    t.atg_linalg_eigh(&out, self, uplo_cstr, i32(len(UPLO)))
     return track(out)
 }
 
 linalg_eigvalsh :: proc(self: Tensor, UPLO: string = "L") -> Tensor {
     out: Tensor
     uplo_cstr := strings.clone_to_cstring(UPLO, context.temp_allocator)
-    t.atg_linalg_eigvalsh(&out, self, uplo_cstr, c.int(len(UPLO)))
+    t.atg_linalg_eigvalsh(&out, self, uplo_cstr, i32(len(UPLO)))
     return track(out)
 }
 
@@ -6038,12 +5934,12 @@ linalg_eigh_out :: proc(self: Tensor, UPLO: string = "L") -> (eigvals, eigvecs: 
     
     uplo_cstr := strings.clone_to_cstring(UPLO, context.temp_allocator)
     dummy: Tensor
-    t.atg_linalg_eigh_eigvals(&dummy, eigvals, eigvecs, self, uplo_cstr, c.int(len(UPLO)))
+    t.atg_linalg_eigh_eigvals(&dummy, eigvals, eigvecs, self, uplo_cstr, i32(len(UPLO)))
     
     return eigvals, eigvecs
 }
 
-//  Inverses and Solving ---
+//  Inverses / Solving
 
 linalg_inv :: proc(A: Tensor) -> Tensor {
     out: Tensor
@@ -6054,7 +5950,7 @@ linalg_inv :: proc(A: Tensor) -> Tensor {
 linalg_inv_ex :: proc(A: Tensor, check_errors: bool = false) -> Tensor {
     // Returns Tuple(inverse, info)
     out: Tensor
-    check_int := c.int(1) if check_errors else c.int(0)
+    check_int := i32(1) if check_errors else i32(0)
     t.atg_linalg_inv_ex(&out, A, check_int)
     return track(out)
 }
@@ -6062,7 +5958,7 @@ linalg_inv_ex :: proc(A: Tensor, check_errors: bool = false) -> Tensor {
 linalg_inv_ex_out :: proc(A: Tensor, check_errors: bool = false) -> (inverse, info: Tensor) {
     inverse = new_tensor()
     info = new_tensor()
-    check_int := c.int(1) if check_errors else c.int(0)
+    check_int := i32(1) if check_errors else i32(0)
     
     dummy: Tensor
     t.atg_linalg_inv_ex_inverse(&dummy, inverse, info, A, check_int)
@@ -6079,10 +5975,10 @@ linalg_tensorsolve :: proc(self, other: Tensor, dims: []i64 = nil) -> Tensor {
     out: Tensor
     
     dim_ptr: ^i64 = nil
-    dim_len: c.int = 0
+    dim_len: i32 = 0
     if len(dims) > 0 {
         dim_ptr = raw_data(dims)
-        dim_len = c.int(len(dims))
+        dim_len = i32(len(dims))
     }
 
     t.atg_linalg_tensorsolve(&out, self, other, dim_ptr, dim_len)
@@ -6091,8 +5987,8 @@ linalg_tensorsolve :: proc(self, other: Tensor, dims: []i64 = nil) -> Tensor {
 
 linalg_solve_ex :: proc(A, B: Tensor, left: bool = true, check_errors: bool = false) -> Tensor {
     out: Tensor
-    left_int := c.int(1) if left else c.int(0)
-    check_int := c.int(1) if check_errors else c.int(0)
+    left_int := i32(1) if left else i32(0)
+    check_int := i32(1) if check_errors else i32(0)
     t.atg_linalg_solve_ex(&out, A, B, left_int, check_int)
     return track(out)
 }
@@ -6100,54 +5996,53 @@ linalg_solve_ex :: proc(A, B: Tensor, left: bool = true, check_errors: bool = fa
 linalg_solve_triangular :: proc(self, B: Tensor, upper: bool, left: bool = true, unitriangular: bool = false) -> Tensor {
     out: Tensor
     t.atg_linalg_solve_triangular(&out, self, B, 
-        c.int(1) if upper else c.int(0), 
-        c.int(1) if left else c.int(0), 
-        c.int(1) if unitriangular else c.int(0))
+        i32(1) if upper else i32(0), 
+        i32(1) if left else i32(0), 
+        i32(1) if unitriangular else i32(0))
     return track(out)
 }
 
-//  Matrix Rank ---
+//  Matrix Rank
 
 linalg_matrix_rank :: proc(self: Tensor, tol: f64, hermitian: bool = false) -> Tensor {
     out: Tensor
-    herm_int := c.int(1) if hermitian else c.int(0)
+    herm_int := i32(1) if hermitian else i32(0)
     t.atg_linalg_matrix_rank(&out, self, tol, herm_int)
     return track(out)
 }
 
-// Use this for defaults (tol=None)
+// Default (tol=None)
 linalg_matrix_rank_tensor_tol :: proc(input: Tensor, tol: Tensor, hermitian: bool = false) -> Tensor {
     out: Tensor
-    herm_int := c.int(1) if hermitian else c.int(0)
+    herm_int := i32(1) if hermitian else i32(0)
     // There are several variants in your list, using the explicit tensor tol one here
     t.atg_linalg_matrix_rank_tol_tensor(&out, input, tol, herm_int)
     return track(out)
 }
 
-//  Decompositions (QR, SVD, LU, LDL) ---
+//  Decompositions (QR, SVD, LU, LDL)
 
+// Returns Tuple(Q, R)
 linalg_qr :: proc(A: Tensor, mode: string = "reduced") -> Tensor {
-    // Returns Tuple(Q, R)
     out: Tensor
     mode_cstr := strings.clone_to_cstring(mode, context.temp_allocator)
-    t.atg_linalg_qr(&out, A, mode_cstr, c.int(len(mode)))
+    t.atg_linalg_qr(&out, A, mode_cstr, i32(len(mode)))
     return track(out)
 }
 
 // Computes the singular value decomposition. 
+// Returns Tuple(U, S, Vh)
 linalg_svd :: proc(A: Tensor, full_matrices: bool = true, driver: string = "") -> Tensor {
-    // Returns Tuple(U, S, Vh)
     out: Tensor
-    full_int := c.int(1) if full_matrices else c.int(0)
+    full_int := i32(1) if full_matrices else i32(0)
     
     // Driver can be nil/empty
     driver_ptr: cstring = nil
-    driver_len: c.int = 0
+    driver_len: i32 = 0
     if len(driver) > 0 {
         driver_ptr = strings.clone_to_cstring(driver, context.temp_allocator)
-        driver_len = c.int(len(driver))
+        driver_len = i32(len(driver))
     }
-
     t.atg_linalg_svd(&out, A, full_int, driver_ptr, driver_len)
     return track(out)
 }
@@ -6158,13 +6053,13 @@ linalg_svd_out :: proc(A: Tensor, full_matrices: bool = true, driver: string = "
     S = new_tensor()
     Vh = new_tensor()
     
-    full_int := c.int(1) if full_matrices else c.int(0)
+    full_int := i32(1) if full_matrices else i32(0)
     
     driver_ptr: cstring = nil
-    driver_len: c.int = 0
+    driver_len: i32 = 0
     if len(driver) > 0 {
         driver_ptr = strings.clone_to_cstring(driver, context.temp_allocator)
-        driver_len = c.int(len(driver))
+        driver_len = i32(len(driver))
     }
 
     dummy: Tensor
@@ -6176,71 +6071,71 @@ linalg_svdvals :: proc(A: Tensor, driver: string = "") -> Tensor {
     out: Tensor
     
     driver_ptr: cstring = nil
-    driver_len: c.int = 0
+    driver_len: i32 = 0
     if len(driver) > 0 {
         driver_ptr = strings.clone_to_cstring(driver, context.temp_allocator)
-        driver_len = c.int(len(driver))
+        driver_len = i32(len(driver))
     }
 
     t.atg_linalg_svdvals(&out, A, driver_ptr, driver_len)
     return track(out)
 }
 
+// Returns Tuple(P, L, U) or (LU, Pivots) depending on pivot arg, 
+// wrapped in single Tensor handle
 linalg_lu :: proc(A: Tensor, pivot: bool = true) -> Tensor {
-    // Returns Tuple(P, L, U) or (LU, Pivots) depending on pivot arg, 
-    // wrapped in single Tensor handle
     out: Tensor
-    t.atg_linalg_lu(&out, A, c.int(1) if pivot else c.int(0))
+    t.atg_linalg_lu(&out, A, i32(1) if pivot else i32(0))
     return track(out)
 }
 
+// Returns Tuple(LU, pivots)
 linalg_lu_factor :: proc(A: Tensor, pivot: bool = true) -> Tensor {
-    // Returns Tuple(LU, pivots)
     out: Tensor
-    t.atg_linalg_lu_factor(&out, A, c.int(1) if pivot else c.int(0))
+    t.atg_linalg_lu_factor(&out, A, i32(1) if pivot else i32(0))
     return track(out)
 }
 
 linalg_lu_solve :: proc(LU, pivots, B: Tensor, left: bool = true, adjoint: bool = false) -> Tensor {
     out: Tensor
     t.atg_linalg_lu_solve(&out, LU, pivots, B, 
-        c.int(1) if left else c.int(0), 
-        c.int(1) if adjoint else c.int(0))
+        i32(1) if left else i32(0), 
+        i32(1) if adjoint else i32(0))
     return track(out)
 }
 
+// Returns Tuple(LD, pivots)
 linalg_ldl_factor :: proc(self: Tensor, hermitian: bool = false) -> Tensor {
-    // Returns Tuple(LD, pivots)
     out: Tensor
-    t.atg_linalg_ldl_factor(&out, self, c.int(1) if hermitian else c.int(0))
+    t.atg_linalg_ldl_factor(&out, self, i32(1) if hermitian else i32(0))
     return track(out)
 }
 
 linalg_ldl_solve :: proc(LD, pivots, B: Tensor, hermitian: bool = false) -> Tensor {
     out: Tensor
-    t.atg_linalg_ldl_solve(&out, LD, pivots, B, c.int(1) if hermitian else c.int(0))
+    t.atg_linalg_ldl_solve(&out, LD, pivots, B, i32(1) if hermitian else i32(0))
     return track(out)
 }
 
-//  Least Squares ---
+//  Least Squares
 
 linalg_lstsq :: proc(self, b: Tensor, rcond: f64 = 0, driver: string = "") -> Tensor {
     out: Tensor
     
     driver_ptr: cstring = nil
-    driver_len: c.int = 0
+    driver_len: i32 = 0
     if len(driver) > 0 {
         driver_ptr = strings.clone_to_cstring(driver, context.temp_allocator)
-        driver_len = c.int(len(driver))
+        driver_len = i32(len(driver))
     }
 
     // rcond_null pointer handling:
     // Usually in C-shims, if we want to pass "None", we pass a non-null pointer to 'rcond_null'.
     // Here we assume if the user provides 0.0 (and didn't specify a specific small epsilon),
     // they might mean default. 
-    // *Implementation Note*: For stricter control, we assume 'rcond' is used if not default.
-    // If you need "None", we can add a bool flag.
-    // Assuming 'rcond_null' is a flag pointer: nil = use value, !nil = use default/none.
+    // *Implementation NOTE*: For stricter control, we assume 'rcond' is used if not default.
+    // TODO: add a bool flag for None
+    // 'rcond_null' is a flag pointer: nil = use value, !nil = use default/none.
     
     t.atg_linalg_lstsq(&out, self, b, rcond, nil, driver_ptr, driver_len)
     return track(out)
@@ -6248,7 +6143,7 @@ linalg_lstsq :: proc(self, b: Tensor, rcond: f64 = 0, driver: string = "") -> Te
 
 linalg_pinv :: proc(self: Tensor, rcond: f64, hermitian: bool = false) -> Tensor {
     out: Tensor
-    t.atg_linalg_pinv(&out, self, rcond, c.int(1) if hermitian else c.int(0))
+    t.atg_linalg_pinv(&out, self, rcond, i32(1) if hermitian else i32(0))
     return track(out)
 }
 
@@ -6260,8 +6155,7 @@ linear :: proc(input: Tensor, weight: Tensor, bias: Tensor = Tensor{}) -> Tensor
 }
 
 // LINSPACE
-// Generates a one-dimensional tensor of size `steps` whose values are evenly
-// spaced from `start` to `end`, inclusive.
+// Generates a one-dimensional tensor of size `steps` whose values are evenly spaced from `start` to `end` inclusive
 
 linspace :: proc{
     linspace_scalar_scalar,
@@ -6278,7 +6172,7 @@ linspace_scalar_scalar :: proc(
     device: i32 = 0 // 0 = CPU, 1 = CUDA
 ) -> Tensor {
     out: Tensor
-    t.atg_linspace(&out, start, end, steps, c.int(dtype), c.int(device))
+    t.atg_linspace(&out, start, end, steps, i32(dtype), i32(device))
     return track(out)
 }
 
@@ -6290,7 +6184,7 @@ linspace_scalar_tensor :: proc(
     device: i32 = 0
 ) -> Tensor {
     out: Tensor
-    t.atg_linspace_scalar_tensor(&out, start, end, steps, c.int(dtype), c.int(device))
+    t.atg_linspace_scalar_tensor(&out, start, end, steps, i32(dtype), i32(device))
     return track(out)
 }
 
@@ -6302,7 +6196,7 @@ linspace_tensor_scalar :: proc(
     device: i32 = 0
 ) -> Tensor {
     out: Tensor
-    t.atg_linspace_tensor_scalar(&out, start, end, steps, c.int(dtype), c.int(device))
+    t.atg_linspace_tensor_scalar(&out, start, end, steps, i32(dtype), i32(device))
     return track(out)
 }
 
@@ -6314,14 +6208,14 @@ linspace_tensor_tensor :: proc(
     device: i32 = 0
 ) -> Tensor {
     out: Tensor
-    t.atg_linspace_tensor_tensor(&out, start, end, steps, c.int(dtype), c.int(device))
+    t.atg_linspace_tensor_tensor(&out, start, end, steps, i32(dtype), i32(device))
     return track(out)
 }
 
-// LOGARITHMS & EXPONENTIALS
+// LOGARITHMS / EXPONENTIALS
 
 // Basic Log (Natural Logarithm)
-log_new :: proc(self: Tensor) -> Tensor {
+log:: proc(self: Tensor) -> Tensor {
     out: Tensor
     t.atg_log(&out, self)
     return track(out)
@@ -6334,7 +6228,7 @@ log_ :: proc(self: Tensor) -> Tensor {
 }
 
 // Log10 (Base 10)
-log10_new :: proc(self: Tensor) -> Tensor {
+log10:: proc(self: Tensor) -> Tensor {
     out: Tensor
     t.atg_log10(&out, self)
     return track(out)
@@ -6347,7 +6241,7 @@ log10_ :: proc(self: Tensor) -> Tensor {
 }
 
 // Log1p (Natural Log of 1 + input)
-log1p_new :: proc(self: Tensor) -> Tensor {
+log1p:: proc(self: Tensor) -> Tensor {
     out: Tensor
     t.atg_log1p(&out, self)
     return track(out)
@@ -6360,7 +6254,7 @@ log1p_ :: proc(self: Tensor) -> Tensor {
 }
 
 // Log2 (Base 2)
-log2_new :: proc(self: Tensor) -> Tensor {
+log2:: proc(self: Tensor) -> Tensor {
     out: Tensor
     t.atg_log2(&out, self)
     return track(out)
@@ -6374,7 +6268,7 @@ log2_ :: proc(self: Tensor) -> Tensor {
 
 // Log Normal
 // Returns a tensor of random numbers drawn from a log-normal distribution.
-log_normal_new :: proc(self: Tensor, mean: f64 = 1.0, std: f64 = 2.0) -> Tensor {
+log_normal:: proc(self: Tensor, mean: f64 = 1.0, std: f64 = 2.0) -> Tensor {
     out: Tensor
     t.atg_log_normal(&out, self, mean, std)
     return track(out)
@@ -6396,7 +6290,7 @@ log_sigmoid :: proc(self: Tensor) -> Tensor {
 // Log Softmax
 log_softmax :: proc(self: Tensor, dim: i64, dtype: ScalarType) -> Tensor {
     out: Tensor
-    t.atg_log_softmax(&out, self, dim, c.int(dtype))
+    t.atg_log_softmax(&out, self, dim, i32(dtype))
     return track(out)
 }
 
@@ -6432,8 +6326,8 @@ logdet :: proc(self: Tensor) -> Tensor {
 }
 
 // LOW LEVEL BACKWARD OPS
-// Usually not called directly unless implementing custom autograd functions
 
+// Usually not called directly unless implementing custom autograd functions
 log_sigmoid_backward :: proc(grad_output: Tensor, self: Tensor, buffer: Tensor) -> Tensor {
     out: Tensor
     t.atg_log_sigmoid_backward(&out, grad_output, self, buffer)
@@ -6502,12 +6396,11 @@ logical_not_tensor_ :: proc(self: Tensor) -> Tensor {
 
 // LOGIT
 // Inverse of sigmoid. eps is used to clamp probabilities.
-// eps_null can typically be nil if you want default behavior, or provided to override.
+// eps_null can typically be nil if you want default behavior
 
-logit_new :: proc(self: Tensor, eps: f64 = -1.0) -> Tensor {
+logit:: proc(self: Tensor, eps: f64 = -1.0) -> Tensor {
     out: Tensor
-    // We assume the C-shim handles nil to mean "None" or checks the eps value.
-    // Passing nil for the rawptr sentinel.
+    // We assume the C-shim handles nil to mean "None" or to check the eps value
     t.atg_logit(&out, self, eps, nil)
     return track(out)
 }
@@ -6524,9 +6417,7 @@ logit_backward :: proc(grad_output: Tensor, self: Tensor, eps: f64 = -1.0) -> Te
     return track(out)
 }
 
-// LOGSPACE
-// Generates a 1D tensor of logarithmically spaced values.
-
+// LOGSPACE - Generates a 1D tensor of logarithmically spaced values
 logspace :: proc{
     logspace_scalar_scalar,
     logspace_scalar_tensor,
@@ -6534,50 +6425,47 @@ logspace :: proc{
     logspace_tensor_tensor,
 }
 
-// Defaults: Kind=0 (Float), Device=0 (CPU). Adjust constants as per your c10 setup.
 logspace_scalar_scalar :: proc(start, end: Scalar, steps: i64, base: f64 = 10.0, dtype: i32 = 0, device: i32 = 0) -> Tensor {
     out: Tensor
-    t.atg_logspace(&out, start, end, steps, base, c.int(dtype), c.int(device))
+    t.atg_logspace(&out, start, end, steps, base, i32(dtype), i32(device))
     return track(out)
 }
 
 logspace_scalar_tensor :: proc(start: Scalar, end: Tensor, steps: i64, base: f64 = 10.0, dtype: i32 = 0, device: i32 = 0) -> Tensor {
     out: Tensor
-    t.atg_logspace_scalar_tensor(&out, start, end, steps, base, c.int(dtype), c.int(device))
+    t.atg_logspace_scalar_tensor(&out, start, end, steps, base, i32(dtype), i32(device))
     return track(out)
 }
 
 logspace_tensor_scalar :: proc(start: Tensor, end: Scalar, steps: i64, base: f64 = 10.0, dtype: i32 = 0, device: i32 = 0) -> Tensor {
     out: Tensor
-    t.atg_logspace_tensor_scalar(&out, start, end, steps, base, c.int(dtype), c.int(device))
+    t.atg_logspace_tensor_scalar(&out, start, end, steps, base, i32(dtype), i32(device))
     return track(out)
 }
 
 logspace_tensor_tensor :: proc(start, end: Tensor, steps: i64, base: f64 = 10.0, dtype: i32 = 0, device: i32 = 0) -> Tensor {
     out: Tensor
-    t.atg_logspace_tensor_tensor(&out, start, end, steps, base, c.int(dtype), c.int(device))
+    t.atg_logspace_tensor_tensor(&out, start, end, steps, base, i32(dtype), i32(device))
     return track(out)
 }
 
-// LOGSUMEXP
-// Returns the log of the sum of the exponentials of the elements.
+// LOGSUMEXP - Returns the log of the sum of the exponentials of the elements
 
 logsumexp :: proc(self: Tensor, dim: []i64, keepdim: bool = false) -> Tensor {
     out: Tensor
-    keep_int := c.int(1) if keepdim else c.int(0)
+    keep_int := i32(1) if keepdim else i32(0)
     
     t.atg_logsumexp(
         &out, 
         self, 
         raw_data(dim), 
-        c.int(len(dim)), 
+        i32(len(dim)), 
         keep_int,
     )
     return track(out)
 }
 
-// LESS THAN (LT)
-// Computes self < other
+// LESS THAN (LT) - Computes self < other
 
 lt :: proc{lt_scalar, lt_tensor}
 lt_ :: proc{lt_scalar_, lt_tensor_}
@@ -6606,8 +6494,7 @@ lt_tensor_ :: proc(self, other: Tensor) -> Tensor {
     return self
 }
 
-// LU SOLVE
-// Returns the LU solve of the linear system Ax = b using LU factorization
+// LU SOLVE - Returns the LU solve of the linear system Ax = b using LU factorization
 
 lu_solve :: proc(self: Tensor, LU_data: Tensor, LU_pivots: Tensor) -> Tensor {
     out: Tensor
@@ -6615,21 +6502,21 @@ lu_solve :: proc(self: Tensor, LU_data: Tensor, LU_pivots: Tensor) -> Tensor {
     return track(out)
 }
 
-//  LOSS FUNCTIONS ---
+//  LOSS FUNCTIONS
 
 margin_ranking_loss :: proc(
     input1, input2, target: Tensor, 
     margin: f64 = 0.0, 
-    reduction: i64 = 1 // 1=Mean, 0=None, 2=Sum usually
+    reduction: i64 = 1 // TODO: enum 1=Mean, 0=None, 2=Sum
 ) -> Tensor {
     out: Tensor
     t.atg_margin_ranking_loss(&out, input1, input2, target, margin, reduction)
     return track(out)
 }
 
-//  MASKED OPERATIONS ---
+//  MASKED OPERATIONS
 
-// Masked Fill (Scalar)
+// Masked Fill Scalar
 masked_fill :: proc{masked_fill_scalar, masked_fill_tensor}
 masked_fill_ :: proc{masked_fill_scalar_, masked_fill_tensor_}
 
@@ -6645,7 +6532,7 @@ masked_fill_scalar_ :: proc(self: Tensor, mask: Tensor, value: Scalar) -> Tensor
     return self
 }
 
-// Masked Fill (Tensor)
+// Masked Fill Tensor
 masked_fill_tensor :: proc(self: Tensor, mask: Tensor, value: Tensor) -> Tensor {
     out: Tensor
     t.atg_masked_fill_tensor(&out, self, mask, value)
@@ -6678,7 +6565,7 @@ masked_scatter_backward :: proc(grad_output: Tensor, mask: Tensor, sizes: []i64)
         grad_output, 
         mask, 
         raw_data(sizes), 
-        c.int(len(sizes)),
+        i32(len(sizes)),
     )
     return track(out)
 }
@@ -6696,7 +6583,7 @@ masked_select_backward :: proc(grad: Tensor, input: Tensor, mask: Tensor) -> Ten
     return track(out)
 }
 
-//  MATRIX OPERATIONS ---
+//  MATRIX OPS
 
 matmul :: proc(self: Tensor, other: Tensor) -> Tensor {
     out: Tensor
@@ -6729,7 +6616,7 @@ matrix_power :: proc(self: Tensor, n: i64) -> Tensor {
     return track(out)
 }
 
-//  REDUCTIONS & MAX ---
+//  REDUCTIONS & MAX
 
 // Element-wise max (alias for maximum)
 max_other :: proc(self: Tensor, other: Tensor) -> Tensor {
@@ -6744,20 +6631,18 @@ maximum :: proc(self: Tensor, other: Tensor) -> Tensor {
     return track(out)
 }
 
-// Global Max
 max :: proc(self: Tensor) -> Tensor {
     out: Tensor
     t.atg_max(&out, self)
     return track(out)
 }
 
-// Max Dim (Tuple Return)
-// Returns (values, indices)
+// Max Dim returns tuple (values, indices)
 max_dim :: proc(self: Tensor, dim: i64, keepdim: bool = false) -> (values, indices: Tensor) {
     values = new_tensor()
     indices = new_tensor()
     
-    keep_int := c.int(1) if keepdim else c.int(0)
+    keep_int := i32(1) if keepdim else i32(0)
     
     // Using the explicit out variant to fill our tracked tensors
     dummy: Tensor
@@ -6768,7 +6653,7 @@ max_dim :: proc(self: Tensor, dim: i64, keepdim: bool = false) -> (values, indic
 
 mean :: proc(self: Tensor, dtype: ScalarType) -> Tensor {
     out: Tensor
-    t.atg_mean(&out, self, c.int(dtype))
+    t.atg_mean(&out, self, i32(dtype))
     return track(out)
 }
 
@@ -6776,18 +6661,18 @@ mean_dim :: proc(
     self: Tensor, 
     dim: []i64, 
     keepdim: bool = false, 
-    dtype: ScalarType = ScalarType.Float // Default needed? Or handle optional
+    dtype: ScalarType = ScalarType.Float
 ) -> Tensor {
     out: Tensor
-    keep_int := c.int(1) if keepdim else c.int(0)
+    keep_int := i32(1) if keepdim else i32(0)
     
     t.atg_mean_dim(
         &out, 
         self, 
         raw_data(dim), 
-        c.int(len(dim)), 
+        i32(len(dim)), 
         keep_int, 
-        c.int(dtype),
+        i32(dtype),
     )
     return track(out)
 }
@@ -6799,13 +6684,12 @@ median :: proc(self: Tensor) -> Tensor {
     return track(out)
 }
 
-// Median Dim (Tuple Return)
-// Returns (values, indices)
+// Median Dim returns tuple (values, indices)
 median_dim :: proc(self: Tensor, dim: i64, keepdim: bool = false) -> (values, indices: Tensor) {
     values = new_tensor()
     indices = new_tensor()
     
-    keep_int := c.int(1) if keepdim else c.int(0)
+    keep_int := i32(1) if keepdim else i32(0)
     
     dummy: Tensor
     t.atg_median_dim_values(&dummy, values, indices, self, dim, keep_int)
@@ -6813,13 +6697,12 @@ median_dim :: proc(self: Tensor, dim: i64, keepdim: bool = false) -> (values, in
     return values, indices
 }
 
-//  POOLING LAYERS ---
+//  POOLING LAYERS
 
-// Helper to handle nil slices gracefully if needed, 
-// though generally explicit slices are preferred in Odin.
+// TODO: use handle nil slices gracefully
 @(private)
-_slice_args :: proc(s: []i64) -> ([^]i64, c.int) {
-    return raw_data(s), c.int(len(s))
+_slice_args :: proc(s: []i64) -> ([^]i64, i32) {
+    return raw_data(s), i32(len(s))
 }
 
 // Max Pool 1D
@@ -6829,14 +6712,14 @@ max_pool1d :: proc(
     ceil_mode: bool = false
 ) -> Tensor {
     out: Tensor
-    c_ceil := c.int(1) if ceil_mode else c.int(0)
+    c_ceil := i32(1) if ceil_mode else i32(0)
     
     t.atg_max_pool1d(
         &out, self,
-        raw_data(kernel_size), c.int(len(kernel_size)),
-        raw_data(stride),      c.int(len(stride)),
-        raw_data(padding),     c.int(len(padding)),
-        raw_data(dilation),    c.int(len(dilation)),
+        raw_data(kernel_size), i32(len(kernel_size)),
+        raw_data(stride),      i32(len(stride)),
+        raw_data(padding),     i32(len(padding)),
+        raw_data(dilation),    i32(len(dilation)),
         c_ceil,
     )
     return track(out)
@@ -6847,34 +6730,19 @@ max_pool1d_with_indices :: proc(
     kernel_size, stride, padding, dilation: []i64, 
     ceil_mode: bool = false
 ) -> (output, indices: Tensor) {
-    // Note: The C signature provided 'atg_max_pool1d_with_indices' 
-    // takes 'out: ^Tensor'. Usually this returns a Tuple tensor or 
-    // expects multiple output pointers. 
-    // Assuming standard tuple return via single handle here based on signature:
-    // If the binding actually returned std::tuple<Tensor, Tensor>, 
-    // the C wrapper likely returns a single pointer to that tuple 
-    // or requires specific _out variants. 
-    // *If* this behaves like aminmax, we might need a specific bindings variant.
-    // For now, assuming it returns the output tensor and we can't easily get indices 
-    // without the `_out` variant taking two tensors. 
-    // However, typically `max_pool1d_with_indices` in C APIs returns a tuple.
-    
-    // Implementation placeholder assuming 'out' is a tuple-container tensor
+    // TODO: placeholder assuming 'out' is a tuple-container tensor
     out_tuple: Tensor
-    c_ceil := c.int(1) if ceil_mode else c.int(0)
+    c_ceil := i32(1) if ceil_mode else i32(0)
     
     t.atg_max_pool1d_with_indices(
         &out_tuple, self,
-        raw_data(kernel_size), c.int(len(kernel_size)),
-        raw_data(stride),      c.int(len(stride)),
-        raw_data(padding),     c.int(len(padding)),
-        raw_data(dilation),    c.int(len(dilation)),
+        raw_data(kernel_size), i32(len(kernel_size)),
+        raw_data(stride),      i32(len(stride)),
+        raw_data(padding),     i32(len(padding)),
+        raw_data(dilation),    i32(len(dilation)),
         c_ceil,
     )
-    
-    // If out_tuple is a tuple, we would need a "tuple_get" function.
-    // If you don't have tuple accessors yet, this specific function might need 
-    // a custom C-binding that splits the tuple into two output tensors.
+    // TODO: "tuple_get" func
     return track(out_tuple), new_tensor() // Placeholder for indices
 }
 
@@ -6885,14 +6753,14 @@ max_pool2d :: proc(
     ceil_mode: bool = false
 ) -> Tensor {
     out: Tensor
-    c_ceil := c.int(1) if ceil_mode else c.int(0)
+    c_ceil := i32(1) if ceil_mode else i32(0)
     
     t.atg_max_pool2d(
         &out, self,
-        raw_data(kernel_size), c.int(len(kernel_size)),
-        raw_data(stride),      c.int(len(stride)),
-        raw_data(padding),     c.int(len(padding)),
-        raw_data(dilation),    c.int(len(dilation)),
+        raw_data(kernel_size), i32(len(kernel_size)),
+        raw_data(stride),      i32(len(stride)),
+        raw_data(padding),     i32(len(padding)),
+        raw_data(dilation),    i32(len(dilation)),
         c_ceil,
     )
     return track(out)
@@ -6904,14 +6772,14 @@ max_pool2d_backward :: proc(
     ceil_mode: bool = false
 ) -> Tensor {
     out: Tensor
-    c_ceil := c.int(1) if ceil_mode else c.int(0)
+    c_ceil := i32(1) if ceil_mode else i32(0)
 
     t.atg_max_pool2d_backward(
         &out, grad_output, self,
-        raw_data(kernel_size), c.int(len(kernel_size)),
-        raw_data(stride),      c.int(len(stride)),
-        raw_data(padding),     c.int(len(padding)),
-        raw_data(dilation),    c.int(len(dilation)),
+        raw_data(kernel_size), i32(len(kernel_size)),
+        raw_data(stride),      i32(len(stride)),
+        raw_data(padding),     i32(len(padding)),
+        raw_data(dilation),    i32(len(dilation)),
         c_ceil,
     )
     return track(out)
@@ -6924,14 +6792,14 @@ max_pool3d :: proc(
     ceil_mode: bool = false
 ) -> Tensor {
     out: Tensor
-    c_ceil := c.int(1) if ceil_mode else c.int(0)
+    c_ceil := i32(1) if ceil_mode else i32(0)
 
     t.atg_max_pool3d(
         &out, self,
-        raw_data(kernel_size), c.int(len(kernel_size)),
-        raw_data(stride),      c.int(len(stride)),
-        raw_data(padding),     c.int(len(padding)),
-        raw_data(dilation),    c.int(len(dilation)),
+        raw_data(kernel_size), i32(len(kernel_size)),
+        raw_data(stride),      i32(len(stride)),
+        raw_data(padding),     i32(len(padding)),
+        raw_data(dilation),    i32(len(dilation)),
         c_ceil,
     )
     return track(out)
@@ -6946,7 +6814,7 @@ max_unpool2d :: proc(
     out: Tensor
     t.atg_max_unpool2d(
         &out, self, indices, 
-        raw_data(output_size), c.int(len(output_size)),
+        raw_data(output_size), i32(len(output_size)),
     )
     return track(out)
 }
@@ -6959,9 +6827,9 @@ max_unpool3d :: proc(
     out: Tensor
     t.atg_max_unpool3d(
         &out, self, indices,
-        raw_data(output_size), c.int(len(output_size)),
-        raw_data(stride),      c.int(len(stride)),
-        raw_data(padding),     c.int(len(padding)),
+        raw_data(output_size), i32(len(output_size)),
+        raw_data(stride),      i32(len(stride)),
+        raw_data(padding),     i32(len(padding)),
     )
     return track(out)
 }
@@ -6980,7 +6848,7 @@ min_dim :: proc(self: Tensor, dim: i64, keepdim: bool = false) -> (values, indic
     values = new_tensor()
     indices = new_tensor()
     
-    keep_int := c.int(1) if keepdim else c.int(0)
+    keep_int := i32(1) if keepdim else i32(0)
     
     // We use a dummy for the function return value, as the actual results 
     // are written into the pre-allocated tensors 'values' and 'indices'.
@@ -7041,7 +6909,7 @@ miopen_batch_norm :: proc(
     epsilon: f64
 ) -> Tensor {
     out: Tensor
-    is_training := c.int(1) if training else c.int(0)
+    is_training := i32(1) if training else i32(0)
     
     t.atg_miopen_batch_norm(
         &out, 
@@ -7077,15 +6945,15 @@ miopen_convolution :: proc(
 ) -> Tensor {
     out: Tensor
     
-    bench_int := c.int(1) if benchmark else c.int(0)
-    det_int   := c.int(1) if deterministic else c.int(0)
+    bench_int := i32(1) if benchmark else i32(0)
+    det_int   := i32(1) if deterministic else i32(0)
     
     t.atg_miopen_convolution(
         &out,
         self, weight, bias,
-        raw_data(padding), c.int(len(padding)),
-        raw_data(stride), c.int(len(stride)),
-        raw_data(dilation), c.int(len(dilation)),
+        raw_data(padding), i32(len(padding)),
+        raw_data(stride), i32(len(stride)),
+        raw_data(dilation), i32(len(dilation)),
         groups,
         bench_int,
         det_int,
@@ -7109,9 +6977,9 @@ miopen_convolution_add_relu :: proc(
         self, weight, z,
         alpha,
         bias,
-        raw_data(stride), c.int(len(stride)),
-        raw_data(padding), c.int(len(padding)),
-        raw_data(dilation), c.int(len(dilation)),
+        raw_data(stride), i32(len(stride)),
+        raw_data(padding), i32(len(padding)),
+        raw_data(dilation), i32(len(dilation)),
         groups,
     )
     return track(out)
@@ -7129,9 +6997,9 @@ miopen_convolution_relu :: proc(
     t.atg_miopen_convolution_relu(
         &out,
         self, weight, bias,
-        raw_data(stride), c.int(len(stride)),
-        raw_data(padding), c.int(len(padding)),
-        raw_data(dilation), c.int(len(dilation)),
+        raw_data(stride), i32(len(stride)),
+        raw_data(padding), i32(len(padding)),
+        raw_data(dilation), i32(len(dilation)),
         groups,
     )
     return track(out)
@@ -7149,16 +7017,16 @@ miopen_convolution_transpose :: proc(
 ) -> Tensor {
     out: Tensor
     
-    bench_int := c.int(1) if benchmark else c.int(0)
-    det_int   := c.int(1) if deterministic else c.int(0)
+    bench_int := i32(1) if benchmark else i32(0)
+    det_int   := i32(1) if deterministic else i32(0)
 
     t.atg_miopen_convolution_transpose(
         &out,
         self, weight, bias,
-        raw_data(padding), c.int(len(padding)),
-        raw_data(output_padding), c.int(len(output_padding)),
-        raw_data(stride), c.int(len(stride)),
-        raw_data(dilation), c.int(len(dilation)),
+        raw_data(padding), i32(len(padding)),
+        raw_data(output_padding), i32(len(output_padding)),
+        raw_data(stride), i32(len(stride)),
+        raw_data(dilation), i32(len(dilation)),
         groups,
         bench_int,
         det_int,
@@ -7177,15 +7045,15 @@ miopen_depthwise_convolution :: proc(
 ) -> Tensor {
     out: Tensor
 
-    bench_int := c.int(1) if benchmark else c.int(0)
-    det_int   := c.int(1) if deterministic else c.int(0)
+    bench_int := i32(1) if benchmark else i32(0)
+    det_int   := i32(1) if deterministic else i32(0)
 
     t.atg_miopen_depthwise_convolution(
         &out,
         self, weight, bias,
-        raw_data(padding), c.int(len(padding)),
-        raw_data(stride), c.int(len(stride)),
-        raw_data(dilation), c.int(len(dilation)),
+        raw_data(padding), i32(len(padding)),
+        raw_data(stride), i32(len(stride)),
+        raw_data(dilation), i32(len(dilation)),
         groups,
         bench_int,
         det_int,
@@ -7210,9 +7078,9 @@ miopen_rnn :: proc(
 ) -> Tensor {
     out: Tensor
     
-    bf_int    := c.int(1) if batch_first else c.int(0)
-    train_int := c.int(1) if train else c.int(0)
-    bi_int    := c.int(1) if bidirectional else c.int(0)
+    bf_int    := i32(1) if batch_first else i32(0)
+    train_int := i32(1) if train else i32(0)
+    bi_int    := i32(1) if bidirectional else i32(0)
     
     // Helper to get pointer to first tensor in slice
     weight_ptr := raw_data(weights) if len(weights) > 0 else nil
@@ -7220,7 +7088,7 @@ miopen_rnn :: proc(
     t.atg_miopen_rnn(
         &out,
         input,
-        weight_ptr, c.int(len(weights)), stride0,
+        weight_ptr, i32(len(weights)), stride0,
         hx, cx,
         mode,
         hidden_size,
@@ -7229,7 +7097,7 @@ miopen_rnn :: proc(
         dropout,
         train_int,
         bi_int,
-        raw_data(batch_sizes), c.int(len(batch_sizes)),
+        raw_data(batch_sizes), i32(len(batch_sizes)),
         dropout_state,
     )
     return track(out)
@@ -7243,7 +7111,7 @@ mkldnn_adaptive_avg_pool2d :: proc(self: Tensor, output_size: []i64) -> Tensor {
         &out, 
         self, 
         raw_data(output_size), 
-        c.int(len(output_size)),
+        i32(len(output_size)),
     )
     return track(out)
 }
@@ -7263,9 +7131,9 @@ mkldnn_convolution :: proc(
     t.atg_mkldnn_convolution(
         &out, 
         self, weight, bias,
-        raw_data(padding), c.int(len(padding)),
-        raw_data(stride), c.int(len(stride)),
-        raw_data(dilation), c.int(len(dilation)),
+        raw_data(padding), i32(len(padding)),
+        raw_data(stride), i32(len(stride)),
+        raw_data(dilation), i32(len(dilation)),
         groups,
     )
     return track(out)
@@ -7286,7 +7154,7 @@ mkldnn_linear_backward_input :: proc(
     t.atg_mkldnn_linear_backward_input(
         &out, 
         raw_data(input_size), 
-        c.int(len(input_size)), 
+        i32(len(input_size)), 
         grad_output, 
         weight,
     )
@@ -7300,7 +7168,7 @@ mkldnn_linear_backward_weights :: proc(
     bias_defined: bool,
 ) -> Tensor {
     out: Tensor
-    b_def := c.int(1) if bias_defined else c.int(0)
+    b_def := i32(1) if bias_defined else i32(0)
     t.atg_mkldnn_linear_backward_weights(&out, grad_output, input, weight, b_def)
     return track(out)
 }
@@ -7311,14 +7179,14 @@ mkldnn_max_pool2d :: proc(
     ceil_mode: bool = false,
 ) -> Tensor {
     out: Tensor
-    ceil_int := c.int(1) if ceil_mode else c.int(0)
+    ceil_int := i32(1) if ceil_mode else i32(0)
     t.atg_mkldnn_max_pool2d(
         &out, 
         self,
-        raw_data(kernel_size), c.int(len(kernel_size)),
-        raw_data(stride), c.int(len(stride)),
-        raw_data(padding), c.int(len(padding)),
-        raw_data(dilation), c.int(len(dilation)),
+        raw_data(kernel_size), i32(len(kernel_size)),
+        raw_data(stride), i32(len(stride)),
+        raw_data(padding), i32(len(padding)),
+        raw_data(dilation), i32(len(dilation)),
         ceil_int,
     )
     return track(out)
@@ -7330,14 +7198,14 @@ mkldnn_max_pool2d_backward :: proc(
     ceil_mode: bool = false,
 ) -> Tensor {
     out: Tensor
-    ceil_int := c.int(1) if ceil_mode else c.int(0)
+    ceil_int := i32(1) if ceil_mode else i32(0)
     t.atg_mkldnn_max_pool2d_backward(
         &out, 
         grad_output, output, input,
-        raw_data(kernel_size), c.int(len(kernel_size)),
-        raw_data(stride), c.int(len(stride)),
-        raw_data(padding), c.int(len(padding)),
-        raw_data(dilation), c.int(len(dilation)),
+        raw_data(kernel_size), i32(len(kernel_size)),
+        raw_data(stride), i32(len(stride)),
+        raw_data(padding), i32(len(padding)),
+        raw_data(dilation), i32(len(dilation)),
         ceil_int,
     )
     return track(out)
@@ -7349,14 +7217,14 @@ mkldnn_max_pool3d :: proc(
     ceil_mode: bool = false,
 ) -> Tensor {
     out: Tensor
-    ceil_int := c.int(1) if ceil_mode else c.int(0)
+    ceil_int := i32(1) if ceil_mode else i32(0)
     t.atg_mkldnn_max_pool3d(
         &out, 
         self,
-        raw_data(kernel_size), c.int(len(kernel_size)),
-        raw_data(stride), c.int(len(stride)),
-        raw_data(padding), c.int(len(padding)),
-        raw_data(dilation), c.int(len(dilation)),
+        raw_data(kernel_size), i32(len(kernel_size)),
+        raw_data(stride), i32(len(stride)),
+        raw_data(padding), i32(len(padding)),
+        raw_data(dilation), i32(len(dilation)),
         ceil_int,
     )
     return track(out)
@@ -7368,14 +7236,14 @@ mkldnn_max_pool3d_backward :: proc(
     ceil_mode: bool = false,
 ) -> Tensor {
     out: Tensor
-    ceil_int := c.int(1) if ceil_mode else c.int(0)
+    ceil_int := i32(1) if ceil_mode else i32(0)
     t.atg_mkldnn_max_pool3d_backward(
         &out, 
         grad_output, output, input,
-        raw_data(kernel_size), c.int(len(kernel_size)),
-        raw_data(stride), c.int(len(stride)),
-        raw_data(padding), c.int(len(padding)),
-        raw_data(dilation), c.int(len(dilation)),
+        raw_data(kernel_size), i32(len(kernel_size)),
+        raw_data(stride), i32(len(stride)),
+        raw_data(padding), i32(len(padding)),
+        raw_data(dilation), i32(len(dilation)),
         ceil_int,
     )
     return track(out)
@@ -7391,11 +7259,11 @@ mkldnn_reorder_conv2d_weight :: proc(
     t.atg_mkldnn_reorder_conv2d_weight(
         &out, 
         self,
-        raw_data(padding), c.int(len(padding)),
-        raw_data(stride), c.int(len(stride)),
-        raw_data(dilation), c.int(len(dilation)),
+        raw_data(padding), i32(len(padding)),
+        raw_data(stride), i32(len(stride)),
+        raw_data(dilation), i32(len(dilation)),
         groups,
-        raw_data(input_size), c.int(len(input_size)),
+        raw_data(input_size), i32(len(input_size)),
     )
     return track(out)
 }
@@ -7410,16 +7278,16 @@ mkldnn_reorder_conv3d_weight :: proc(
     t.atg_mkldnn_reorder_conv3d_weight(
         &out, 
         self,
-        raw_data(padding), c.int(len(padding)),
-        raw_data(stride), c.int(len(stride)),
-        raw_data(dilation), c.int(len(dilation)),
+        raw_data(padding), i32(len(padding)),
+        raw_data(stride), i32(len(stride)),
+        raw_data(dilation), i32(len(dilation)),
         groups,
-        raw_data(input_size), c.int(len(input_size)),
+        raw_data(input_size), i32(len(input_size)),
     )
     return track(out)
 }
 
-// Note: This function takes 4 specific weights and initial hidden states (hx, cx)
+// NOTE: This function takes 4 specific weights and initial hidden states (hx, cx)
 mkldnn_rnn_layer :: proc(
     input: Tensor,
     w0, w1, w2, w3: Tensor,
@@ -7438,20 +7306,20 @@ mkldnn_rnn_layer :: proc(
     t.atg_mkldnn_rnn_layer(
         &out, 
         input, w0, w1, w2, w3, hx, cx,
-        c.int(1) if reverse else c.int(0),
-        raw_data(batch_sizes), c.int(len(batch_sizes)),
+        i32(1) if reverse else i32(0),
+        raw_data(batch_sizes), i32(len(batch_sizes)),
         mode,
         hidden_size,
         num_layers,
-        c.int(1) if has_biases else c.int(0),
-        c.int(1) if bidirectional else c.int(0),
-        c.int(1) if batch_first else c.int(0),
-        c.int(1) if train else c.int(0),
+        i32(1) if has_biases else i32(0),
+        i32(1) if bidirectional else i32(0),
+        i32(1) if batch_first else i32(0),
+        i32(1) if train else i32(0),
     )
     return track(out)
 }
 
-// Note: Returns out (grad_input?); takes 4 weights, 3 grads, various states
+// NOTE: Returns out (grad_input?); takes 4 weights, 3 grads, various states
 mkldnn_rnn_layer_backward :: proc(
     input: Tensor,
     w1, w2, w3, w4: Tensor,
@@ -7474,15 +7342,15 @@ mkldnn_rnn_layer_backward :: proc(
         input, w1, w2, w3, w4,
         hx, cx_tmp, output, hy, cy,
         grad_output, grad_hy, grad_cy,
-        c.int(1) if reverse else c.int(0),
+        i32(1) if reverse else i32(0),
         mode,
         hidden_size,
         num_layers,
-        c.int(1) if has_biases else c.int(0),
-        c.int(1) if train else c.int(0),
-        c.int(1) if bidirectional else c.int(0),
-        raw_data(batch_sizes), c.int(len(batch_sizes)),
-        c.int(1) if batch_first else c.int(0),
+        i32(1) if has_biases else i32(0),
+        i32(1) if train else i32(0),
+        i32(1) if bidirectional else i32(0),
+        raw_data(batch_sizes), i32(len(batch_sizes)),
+        i32(1) if batch_first else i32(0),
         workspace,
     )
     return track(out)
@@ -7498,7 +7366,7 @@ mm :: proc(self, mat2: Tensor) -> Tensor {
 
 mm_dtype :: proc(self, mat2: Tensor, dtype: ScalarType) -> Tensor {
     out: Tensor
-    t.atg_mm_dtype(&out, self, mat2, c.int(dtype))
+    t.atg_mm_dtype(&out, self, mat2, i32(dtype))
     return track(out)
 }
 
@@ -7509,7 +7377,7 @@ mode :: proc(self: Tensor, dim: i64, keepdim: bool = false) -> (values, indices:
     values = new_tensor()
     indices = new_tensor()
     
-    keep_int := c.int(1) if keepdim else c.int(0)
+    keep_int := i32(1) if keepdim else i32(0)
     
     // We use the explicit output version to safely fill our tracked tensors
     dummy: Tensor
@@ -7526,8 +7394,8 @@ moveaxis_slice :: proc(self: Tensor, source, destination: []i64) -> Tensor {
     t.atg_moveaxis(
         &out, 
         self, 
-        raw_data(source), c.int(len(source)), 
-        raw_data(destination), c.int(len(destination)),
+        raw_data(source), i32(len(source)), 
+        raw_data(destination), i32(len(destination)),
     )
     return track(out)
 }
@@ -7543,8 +7411,8 @@ movedim_slice :: proc(self: Tensor, source, destination: []i64) -> Tensor {
     t.atg_movedim(
         &out, 
         self, 
-        raw_data(source), c.int(len(source)), 
-        raw_data(destination), c.int(len(destination)),
+        raw_data(source), i32(len(source)), 
+        raw_data(destination), i32(len(destination)),
     )
     return track(out)
 }
@@ -7638,7 +7506,7 @@ mv :: proc(self, vec: Tensor) -> Tensor {
 
 multinomial :: proc(self: Tensor, num_samples: i64, replacement: bool = false) -> Tensor {
     out: Tensor
-    rep_int := c.int(1) if replacement else c.int(0)
+    rep_int := i32(1) if replacement else i32(0)
     t.atg_multinomial(&out, self, num_samples, rep_int)
     return track(out)
 }
@@ -7712,27 +7580,27 @@ nanmean :: proc(
     dtype: Maybe(ScalarType) = nil
 ) -> Tensor {
     out: Tensor
-    kd_int := c.int(1) if keepdim else c.int(0)
+    kd_int := i32(1) if keepdim else i32(0)
     
     // dtype handling: standard LibTorch convention is often scalar type int or null
-    dt_int := c.int(dtype.?) if dtype != nil else c.int(6) // Default to Float if nil? 
+    dt_int := i32(dtype.?) if dtype != nil else i32(6) // Default to Float if nil? 
     // Actually, usually in C bindings, optional dtype is passed as a specific flag or ID.
-    // If the binding expects a raw c.int, we pass it. 
+    // If the binding expects a raw i32, we pass it. 
     // If no dtype requested, passing a sentinel (like -1 or None) depends on `atg` specifics.
     // Assuming standard behavior where 6=Float, 7=Double, etc.
     // If the user passed nil, we might need a specific "None" value defined by C10, often -1.
     // We will assume `dtype` is required if not nil, otherwise we pass -1 if safe, 
-    // but the signature has `dtype: c.int` not `rawptr`.
+    // but the signature has `dtype: i32` not `rawptr`.
     // *Correction*: We will assume the user provides specific dtypes or we pass a default.
     // If the binding signature doesn't take a pointer for dtype, we must pass a valid int.
     // Using `ScalarType.Float` as safe default if nil, or -1 if the binder supports it.
-    actual_dtype := c.int(dtype.?) if dtype != nil else c.int(-1) 
+    actual_dtype := i32(dtype.?) if dtype != nil else i32(-1) 
 
     t.atg_nanmean(
         &out, 
         self, 
         raw_data(dim), 
-        c.int(len(dim)), 
+        i32(len(dim)), 
         kd_int, 
         actual_dtype
     )
@@ -7746,14 +7614,14 @@ nansum :: proc(
     dtype: Maybe(ScalarType) = nil
 ) -> Tensor {
     out: Tensor
-    kd_int := c.int(1) if keepdim else c.int(0)
-    actual_dtype := c.int(dtype.?) if dtype != nil else c.int(-1)
+    kd_int := i32(1) if keepdim else i32(0)
+    actual_dtype := i32(dtype.?) if dtype != nil else i32(-1)
 
     t.atg_nansum(
         &out, 
         self, 
         raw_data(dim), 
-        c.int(len(dim)), 
+        i32(len(dim)), 
         kd_int, 
         actual_dtype
     )
@@ -7772,7 +7640,7 @@ nanmedian :: proc(self: Tensor) -> Tensor {
 nanmedian_dim :: proc(self: Tensor, dim: i64, keepdim: bool = false) -> (values, indices: Tensor) {
     values = new_tensor()
     indices = new_tensor()
-    kd_int := c.int(1) if keepdim else c.int(0)
+    kd_int := i32(1) if keepdim else i32(0)
     
     // We use the `_values` variant to ensure we capture both outputs safely
     dummy: Tensor
@@ -7802,7 +7670,7 @@ nanquantile_tensor :: proc(
         dim_p = rawptr(uintptr(1))
     }
 
-    kd_int := c.int(1) if keepdim else c.int(0)
+    kd_int := i32(1) if keepdim else i32(0)
 
     // Handle String
     c_interp := strings.clone_to_cstring(interpolation, context.temp_allocator)
@@ -7815,7 +7683,7 @@ nanquantile_tensor :: proc(
         dim_p, 
         kd_int, 
         c_interp, 
-        c.int(len(interpolation)) // explicit len usually helps safety
+        i32(len(interpolation)) // explicit len usually helps safety
     )
     return track(out)
 }
@@ -7836,7 +7704,7 @@ nanquantile_scalar :: proc(
         dim_p = rawptr(uintptr(1))
     }
 
-    kd_int := c.int(1) if keepdim else c.int(0)
+    kd_int := i32(1) if keepdim else i32(0)
     c_interp := strings.clone_to_cstring(interpolation, context.temp_allocator)
     
     t.atg_nanquantile_scalar(
@@ -7847,13 +7715,13 @@ nanquantile_scalar :: proc(
         dim_p, 
         kd_int, 
         c_interp, 
-        c.int(len(interpolation))
+        i32(len(interpolation))
     )
     return track(out)
 }
 
 // MARGIN LOSSES
-// Note: These usually imply a reduction. 
+// NOTE: These usually imply a reduction. 
 // Standard PyTorch Reduction Enum: None=0, Mean=1, Sum=2.
 
 Reduction :: enum i64 {
@@ -7938,7 +7806,7 @@ native_batch_norm :: proc(
     eps: f64,
 ) -> Tensor {
     out: Tensor
-    train_int := c.int(1) if training else c.int(0)
+    train_int := i32(1) if training else i32(0)
     t.atg_native_batch_norm(&out, input, weight, bias, running_mean, running_var, train_int, momentum, eps)
     return track(out)
 }
@@ -7951,7 +7819,7 @@ native_channel_shuffle :: proc(self: Tensor, groups: i64) -> Tensor {
 
 native_dropout :: proc(input: Tensor, p: f64, train: bool) -> Tensor {
     out: Tensor
-    train_int := c.int(1) if train else c.int(0)
+    train_int := i32(1) if train else i32(0)
     t.atg_native_dropout(&out, input, p, train_int)
     return track(out)
 }
@@ -7986,7 +7854,7 @@ native_layer_norm :: proc(
         &out, 
         input, 
         raw_data(normalized_shape), 
-        c.int(len(normalized_shape)), 
+        i32(len(normalized_shape)), 
         weight, 
         bias, 
         eps,
@@ -8012,15 +7880,15 @@ native_norm_dims :: proc(
     dtype: ScalarType,
 ) -> Tensor {
     out: Tensor
-    keep_int := c.int(1) if keepdim else c.int(0)
+    keep_int := i32(1) if keepdim else i32(0)
     t.atg_native_norm_scalaropt_dim_dtype(
         &out, 
         self, 
         p, 
         raw_data(dim), 
-        c.int(len(dim)), 
+        i32(len(dim)), 
         keep_int, 
-        c.int(dtype),
+        i32(dtype),
     )
     return track(out)
 }
@@ -8057,7 +7925,7 @@ ne_tensor_ :: proc(self: Tensor, other: Tensor) -> Tensor {
 
 // NEGATION / MATH
 
-neg_new :: proc(self: Tensor) -> Tensor {
+neg:: proc(self: Tensor) -> Tensor {
     out: Tensor
     t.atg_neg(&out, self)
     return track(out)
@@ -8069,7 +7937,7 @@ neg_ :: proc(self: Tensor) -> Tensor {
     return self
 }
 
-negative_new :: proc(self: Tensor) -> Tensor {
+negative:: proc(self: Tensor) -> Tensor {
     out: Tensor
     t.atg_negative(&out, self)
     return track(out)
@@ -8102,13 +7970,13 @@ nested_to_padded_tensor :: proc(self: Tensor, padding: f64, output_size: []i64) 
         self, 
         padding, 
         raw_data(output_size), 
-        c.int(len(output_size)),
+        i32(len(output_size)),
     )
     return track(out)
 }
 
 // FACTORIES (new_*)
-// Note: In LibTorch C API, 'self' is often passed to factories to inherit options (device/layout).
+// NOTE: In LibTorch C API, 'self' is often passed to factories to inherit options (device/layout).
 // The `options_kind` and `options_device` usually map to c10::TensorOptions backend/device indices.
 
 new_empty :: proc(
@@ -8122,9 +7990,9 @@ new_empty :: proc(
         &out, 
         self, 
         raw_data(size), 
-        c.int(len(size)), 
-        c.int(options_kind), 
-        c.int(options_device),
+        i32(len(size)), 
+        i32(options_kind), 
+        i32(options_device),
     )
     return track(out)
 }
@@ -8141,11 +8009,11 @@ new_empty_strided :: proc(
         &out, 
         self, 
         raw_data(size), 
-        c.int(len(size)), 
+        i32(len(size)), 
         raw_data(stride), 
-        c.int(len(stride)), 
-        c.int(options_kind), 
-        c.int(options_device),
+        i32(len(stride)), 
+        i32(options_kind), 
+        i32(options_device),
     )
     return track(out)
 }
@@ -8162,10 +8030,10 @@ new_full :: proc(
         &out, 
         self, 
         raw_data(size), 
-        c.int(len(size)), 
+        i32(len(size)), 
         fill_value, 
-        c.int(options_kind), 
-        c.int(options_device),
+        i32(options_kind), 
+        i32(options_device),
     )
     return track(out)
 }
@@ -8181,9 +8049,9 @@ new_ones :: proc(
         &out, 
         self, 
         raw_data(size), 
-        c.int(len(size)), 
-        c.int(options_kind), 
-        c.int(options_device),
+        i32(len(size)), 
+        i32(options_kind), 
+        i32(options_device),
     )
     return track(out)
 }
@@ -8199,9 +8067,9 @@ new_zeros :: proc(
         &out, 
         self, 
         raw_data(size), 
-        c.int(len(size)), 
-        c.int(options_kind), 
-        c.int(options_device),
+        i32(len(size)), 
+        i32(options_kind), 
+        i32(options_device),
     )
     return track(out)
 }
@@ -8230,7 +8098,7 @@ nll_loss2d_backward :: proc(grad_output, self, target, weight: Tensor, reduction
 
 nll_loss2d_backward_grad_input :: proc(grad_input, grad_output, self, target, weight: Tensor, reduction, ignore_index: i64, total_weight: Tensor) -> Tensor {
     out: Tensor
-    // Note: This likely writes to grad_input (in-place-ish) or returns a specific view. 
+    // NOTE: This likely writes to grad_input (in-place-ish) or returns a specific view. 
     // Based on signature `out: ^Tensor` is the result handle.
     t.atg_nll_loss2d_backward_grad_input(&out, grad_input, grad_output, self, target, weight, reduction, ignore_index, total_weight)
     return track(out)
@@ -8291,21 +8159,21 @@ norm_except_dim :: proc(v: Tensor, pow: i64, dim: i64) -> Tensor {
 
 norm_p :: proc(self: Tensor, p: Scalar, dim: []i64, keepdim: bool = false) -> Tensor {
     out: Tensor
-    keep_int := c.int(1) if keepdim else c.int(0)
-    t.atg_norm_scalaropt_dim(&out, self, p, raw_data(dim), c.int(len(dim)), keep_int)
+    keep_int := i32(1) if keepdim else i32(0)
+    t.atg_norm_scalaropt_dim(&out, self, p, raw_data(dim), i32(len(dim)), keep_int)
     return track(out)
 }
 
 norm_p_dtype :: proc(self: Tensor, p: Scalar, dim: []i64, keepdim: bool, dtype: ScalarType) -> Tensor {
     out: Tensor
-    keep_int := c.int(1) if keepdim else c.int(0)
-    t.atg_norm_scalaropt_dim_dtype(&out, self, p, raw_data(dim), c.int(len(dim)), keep_int, c.int(dtype))
+    keep_int := i32(1) if keepdim else i32(0)
+    t.atg_norm_scalaropt_dim_dtype(&out, self, p, raw_data(dim), i32(len(dim)), keep_int, i32(dtype))
     return track(out)
 }
 
 norm_dtype :: proc(self: Tensor, p: Scalar, dtype: ScalarType) -> Tensor {
     out: Tensor
-    t.atg_norm_scalaropt_dtype(&out, self, p, c.int(dtype))
+    t.atg_norm_scalaropt_dtype(&out, self, p, i32(dtype))
     return track(out)
 }
 
@@ -8357,15 +8225,15 @@ not_equal_tensor_ :: proc(self: Tensor, other: Tensor) -> Tensor {
 
 nuclear_norm :: proc(self: Tensor, keepdim: bool = false) -> Tensor {
     out: Tensor
-    keep_int := c.int(1) if keepdim else c.int(0)
+    keep_int := i32(1) if keepdim else i32(0)
     t.atg_nuclear_norm(&out, self, keep_int)
     return track(out)
 }
 
 nuclear_norm_dim :: proc(self: Tensor, dim: []i64, keepdim: bool = false) -> Tensor {
     out: Tensor
-    keep_int := c.int(1) if keepdim else c.int(0)
-    t.atg_nuclear_norm_dim(&out, self, raw_data(dim), c.int(len(dim)), keep_int)
+    keep_int := i32(1) if keepdim else i32(0)
+    t.atg_nuclear_norm_dim(&out, self, raw_data(dim), i32(len(dim)), keep_int)
     return track(out)
 }
 
@@ -8390,8 +8258,8 @@ one_hot :: proc(self: Tensor, num_classes: i64) -> Tensor {
 
 ones :: proc(size: []i64, kind: ScalarType = .Float, device: i32 = 0) -> Tensor {
     out: Tensor
-    // Note: device mappings depend on c10::DeviceType. 0 is usually CPU.
-    t.atg_ones(&out, raw_data(size), c.int(len(size)), c.int(kind), c.int(device))
+    // NOTE: device mappings depend on c10::DeviceType. 0 is usually CPU.
+    t.atg_ones(&out, raw_data(size), i32(len(size)), i32(kind), i32(device))
     return track(out)
 }
 
@@ -8413,8 +8281,8 @@ orgqr :: proc(self: Tensor, input2: Tensor) -> Tensor {
 // Multiplies matmul(Q, input3) where Q is from QR factorization
 ormqr :: proc(self: Tensor, input2, input3: Tensor, left: bool = true, transpose: bool = false) -> Tensor {
     out: Tensor
-    left_int := c.int(1) if left else c.int(0)
-    trans_int := c.int(1) if transpose else c.int(0)
+    left_int := i32(1) if left else i32(0)
+    trans_int := i32(1) if transpose else i32(0)
     t.atg_ormqr(&out, self, input2, input3, left_int, trans_int)
     return track(out)
 }
@@ -8429,19 +8297,19 @@ outer :: proc(self: Tensor, vec2: Tensor) -> Tensor {
 
 permute :: proc(self: Tensor, dims: []i64) -> Tensor {
     out: Tensor
-    t.atg_permute(&out, self, raw_data(dims), c.int(len(dims)))
+    t.atg_permute(&out, self, raw_data(dims), i32(len(dims)))
     return track(out)
 }
 
 permute_copy :: proc(self: Tensor, dims: []i64) -> Tensor {
     out: Tensor
-    t.atg_permute_copy(&out, self, raw_data(dims), c.int(len(dims)))
+    t.atg_permute_copy(&out, self, raw_data(dims), i32(len(dims)))
     return track(out)
 }
 
 pairwise_distance :: proc(x1, x2: Tensor, p: f64 = 2.0, eps: f64 = 1e-6, keepdim: bool = false) -> Tensor {
     out: Tensor
-    keep_int := c.int(1) if keepdim else c.int(0)
+    keep_int := i32(1) if keepdim else i32(0)
     t.atg_pairwise_distance(&out, x1, x2, p, eps, keep_int)
     return track(out)
 }
@@ -8455,13 +8323,13 @@ pdist :: proc(self: Tensor, p: f64 = 2.0) -> Tensor {
 // reduction: 0=None, 1=Mean, 2=Sum
 poisson_nll_loss :: proc(input, target: Tensor, log_input: bool, full: bool, eps: f64, reduction: i64) -> Tensor {
     out: Tensor
-    log_int := c.int(1) if log_input else c.int(0)
-    full_int := c.int(1) if full else c.int(0)
+    log_int := i32(1) if log_input else i32(0)
+    full_int := i32(1) if full else i32(0)
     t.atg_poisson_nll_loss(&out, input, target, log_int, full_int, eps, reduction)
     return track(out)
 }
 
-pin_memory :: proc(self: Tensor, device: c.int = 0) -> Tensor {
+pin_memory :: proc(self: Tensor, device: i32 = 0) -> Tensor {
     out: Tensor
     t.atg_pin_memory(&out, self, device)
     return track(out)
@@ -8561,28 +8429,28 @@ prod :: proc{prod_all, prod_dim}
 
 prod_all :: proc(self: Tensor, dtype: ScalarType = .Float) -> Tensor {
     out: Tensor
-    // We cast the ScalarType enum to c.int as expected by the binding
-    t.atg_prod(&out, self, c.int(dtype))
+    // We cast the ScalarType enum to i32 as expected by the binding
+    t.atg_prod(&out, self, i32(dtype))
     return track(out)
 }
 
 prod_dim :: proc(self: Tensor, dim: i64, keepdim: bool = false, dtype: ScalarType = .Float) -> Tensor {
     out: Tensor
-    keep_int := c.int(1) if keepdim else c.int(0)
-    t.atg_prod_dim_int(&out, self, dim, keep_int, c.int(dtype))
+    keep_int := i32(1) if keepdim else i32(0)
+    t.atg_prod_dim_int(&out, self, dim, keep_int, i32(dtype))
     return track(out)
 }
 
 put :: proc(self, index, source: Tensor, accumulate: bool = false) -> Tensor {
     out: Tensor
-    acc_int := c.int(1) if accumulate else c.int(0)
+    acc_int := i32(1) if accumulate else i32(0)
     t.atg_put(&out, self, index, source, acc_int)
     return track(out)
 }
 
 put_ :: proc(self, index, source: Tensor, accumulate: bool = false) -> Tensor {
     out: Tensor
-    acc_int := c.int(1) if accumulate else c.int(0)
+    acc_int := i32(1) if accumulate else i32(0)
     t.atg_put_(&out, self, index, source, acc_int)
     return self
 }
@@ -8609,7 +8477,7 @@ q_per_channel_zero_points :: proc(self: Tensor) -> Tensor {
 */
 qr :: proc(self: Tensor, some: bool = true) -> Tensor {
     out: Tensor
-    some_int := c.int(1) if some else c.int(0)
+    some_int := i32(1) if some else i32(0)
     t.atg_qr(&out, self, some_int)
     return track(out)
 }
@@ -8620,7 +8488,7 @@ qr :: proc(self: Tensor, some: bool = true) -> Tensor {
 */
 qr_out :: proc(self: Tensor, Q, R: Tensor, some: bool = true) -> (Tensor, Tensor) {
     out: Tensor // Dummy return handle often used in C-shims
-    some_int := c.int(1) if some else c.int(0)
+    some_int := i32(1) if some else i32(0)
     t.atg_qr_q(&out, Q, R, self, some_int)
     // We track Q and R if they weren't already tracked (safe to re-track or they are just updated)
     // Typically 'out' here is void in C++, but if the shim returns a handle, we track it.
@@ -8641,7 +8509,7 @@ quantile :: proc(
     interpolation: string = "linear"
 ) -> Tensor {
     out: Tensor
-    keep_int := c.int(1) if keepdim else c.int(0)
+    keep_int := i32(1) if keepdim else i32(0)
     
     // Handle Optional Dimension
     dim_val: i64 = 0
@@ -8653,7 +8521,7 @@ quantile :: proc(
 
     // Handle String
     interp_cstr := cstring(raw_data(interpolation))
-    interp_len := c.int(len(interpolation))
+    interp_len := i32(len(interpolation))
 
     t.atg_quantile(&out, self, q, dim_val, dim_ptr, keep_int, interp_cstr, interp_len)
     return track(out)
@@ -8667,7 +8535,7 @@ quantile_scalar :: proc(
     interpolation: string = "linear"
 ) -> Tensor {
     out: Tensor
-    keep_int := c.int(1) if keepdim else c.int(0)
+    keep_int := i32(1) if keepdim else i32(0)
     
     dim_val: i64 = 0
     dim_ptr: rawptr = nil
@@ -8677,7 +8545,7 @@ quantile_scalar :: proc(
     }
 
     interp_cstr := cstring(raw_data(interpolation))
-    interp_len := c.int(len(interpolation))
+    interp_len := i32(len(interpolation))
 
     t.atg_quantile_scalar(&out, self, q, dim_val, dim_ptr, keep_int, interp_cstr, interp_len)
     return track(out)
@@ -8687,26 +8555,26 @@ quantile_scalar :: proc(
 
 quantize_per_channel :: proc(self, scales, zero_points: Tensor, axis: i64, dtype: ScalarType) -> Tensor {
     out: Tensor
-    t.atg_quantize_per_channel(&out, self, scales, zero_points, axis, c.int(dtype))
+    t.atg_quantize_per_channel(&out, self, scales, zero_points, axis, i32(dtype))
     return track(out)
 }
 
 quantize_per_tensor :: proc(self: Tensor, scale: f64, zero_point: i64, dtype: ScalarType) -> Tensor {
     out: Tensor
-    t.atg_quantize_per_tensor(&out, self, scale, zero_point, c.int(dtype))
+    t.atg_quantize_per_tensor(&out, self, scale, zero_point, i32(dtype))
     return track(out)
 }
 
 quantize_per_tensor_dynamic :: proc(self: Tensor, dtype: ScalarType, reduce_range: bool = false) -> Tensor {
     out: Tensor
-    reduce_int := c.int(1) if reduce_range else c.int(0)
-    t.atg_quantize_per_tensor_dynamic(&out, self, c.int(dtype), reduce_int)
+    reduce_int := i32(1) if reduce_range else i32(0)
+    t.atg_quantize_per_tensor_dynamic(&out, self, i32(dtype), reduce_int)
     return track(out)
 }
 
 quantize_per_tensor_tensor_qparams :: proc(self, scale, zero_point: Tensor, dtype: ScalarType) -> Tensor {
     out: Tensor
-    t.atg_quantize_per_tensor_tensor_qparams(&out, self, scale, zero_point, c.int(dtype))
+    t.atg_quantize_per_tensor_tensor_qparams(&out, self, scale, zero_point, i32(dtype))
     return track(out)
 }
 
@@ -8752,7 +8620,7 @@ quantized_lstm_cell :: proc(
     out: Tensor
     t.atg_quantized_lstm_cell(
         &out, input, 
-        raw_data(hx), c.int(len(hx)), 
+        raw_data(hx), i32(len(hx)), 
         w_ih, w_hh, b_ih, b_hh, 
         packed_ih, packed_hh, 
         col_offsets_ih, col_offsets_hh, 
@@ -8805,13 +8673,13 @@ quantized_max_pool1d :: proc(
     ceil_mode: bool = false
 ) -> Tensor {
     out: Tensor
-    c_ceil := c.int(1) if ceil_mode else c.int(0)
+    c_ceil := i32(1) if ceil_mode else i32(0)
     t.atg_quantized_max_pool1d(
         &out, self, 
-        raw_data(kernel_size), c.int(len(kernel_size)),
-        raw_data(stride),      c.int(len(stride)),
-        raw_data(padding),     c.int(len(padding)),
-        raw_data(dilation),    c.int(len(dilation)),
+        raw_data(kernel_size), i32(len(kernel_size)),
+        raw_data(stride),      i32(len(stride)),
+        raw_data(padding),     i32(len(padding)),
+        raw_data(dilation),    i32(len(dilation)),
         c_ceil,
     )
     return track(out)
@@ -8823,13 +8691,13 @@ quantized_max_pool2d :: proc(
     ceil_mode: bool = false
 ) -> Tensor {
     out: Tensor
-    c_ceil := c.int(1) if ceil_mode else c.int(0)
+    c_ceil := i32(1) if ceil_mode else i32(0)
     t.atg_quantized_max_pool2d(
         &out, self, 
-        raw_data(kernel_size), c.int(len(kernel_size)),
-        raw_data(stride),      c.int(len(stride)),
-        raw_data(padding),     c.int(len(padding)),
-        raw_data(dilation),    c.int(len(dilation)),
+        raw_data(kernel_size), i32(len(kernel_size)),
+        raw_data(stride),      i32(len(stride)),
+        raw_data(padding),     i32(len(padding)),
+        raw_data(dilation),    i32(len(dilation)),
         c_ceil,
     )
     return track(out)
@@ -8841,13 +8709,13 @@ quantized_max_pool3d :: proc(
     ceil_mode: bool = false
 ) -> Tensor {
     out: Tensor
-    c_ceil := c.int(1) if ceil_mode else c.int(0)
+    c_ceil := i32(1) if ceil_mode else i32(0)
     t.atg_quantized_max_pool3d(
         &out, self, 
-        raw_data(kernel_size), c.int(len(kernel_size)),
-        raw_data(stride),      c.int(len(stride)),
-        raw_data(padding),     c.int(len(padding)),
-        raw_data(dilation),    c.int(len(dilation)),
+        raw_data(kernel_size), i32(len(kernel_size)),
+        raw_data(stride),      i32(len(stride)),
+        raw_data(padding),     i32(len(padding)),
+        raw_data(dilation),    i32(len(dilation)),
         c_ceil,
     )
     return track(out)
@@ -8894,9 +8762,9 @@ rand :: proc(
     t.atg_rand(
         &out, 
         raw_data(size), 
-        c.int(len(size)), 
-        c.int(dtype), 
-        c.int(device),
+        i32(len(size)), 
+        i32(dtype), 
+        i32(device),
     )
     return track(out)
 }
@@ -8918,9 +8786,9 @@ randint :: proc(
         &out, 
         high, 
         raw_data(size), 
-        c.int(len(size)), 
-        c.int(dtype), 
-        c.int(device),
+        i32(len(size)), 
+        i32(dtype), 
+        i32(device),
     )
     return track(out)
 }
@@ -8938,9 +8806,9 @@ randint_low :: proc(
         low, 
         high, 
         raw_data(size), 
-        c.int(len(size)), 
-        c.int(dtype), 
-        c.int(device),
+        i32(len(size)), 
+        i32(dtype), 
+        i32(device),
     )
     return track(out)
 }
@@ -8979,9 +8847,9 @@ randn :: proc(
     t.atg_randn(
         &out, 
         raw_data(size), 
-        c.int(len(size)), 
-        c.int(dtype), 
-        c.int(device),
+        i32(len(size)), 
+        i32(dtype), 
+        i32(device),
     )
     return track(out)
 }
@@ -9002,8 +8870,8 @@ randperm :: proc(
     t.atg_randperm(
         &out, 
         n, 
-        c.int(dtype), 
-        c.int(device),
+        i32(dtype), 
+        i32(device),
     )
     return track(out)
 }
@@ -9017,11 +8885,11 @@ range :: proc(
     device: i32 = DEFAULT_DEVICE
 ) -> Tensor {
     out: Tensor
-    t.atg_range(&out, start, end, c.int(dtype), c.int(device))
+    t.atg_range(&out, start, end, i32(dtype), i32(device))
     return track(out)
 }
 
-// Note: Standard Torch range usually takes (start, end, step). 
+// NOTE: Standard Torch range usually takes (start, end, step). 
 // The binding provided in the prompt for `atg_range_step` only listed start/end.
 // I am binding strictly to the signature provided.
 range_step :: proc(
@@ -9031,7 +8899,7 @@ range_step :: proc(
     device: i32 = DEFAULT_DEVICE
 ) -> Tensor {
     out: Tensor
-    t.atg_range_step(&out, start, end, c.int(dtype), c.int(device))
+    t.atg_range_step(&out, start, end, i32(dtype), i32(device))
     return track(out)
 }
 
@@ -9088,43 +8956,43 @@ reciprocal_ :: proc(self: Tensor) -> Tensor {
 
 // REFLECTION PAD
 
-/* Note: Padding must be supplied as a slice of ints (e.g., {1, 1} for 1D, {1, 1, 2, 2} for 2D).
+/* NOTE: Padding must be supplied as a slice of ints (e.g., {1, 1} for 1D, {1, 1, 2, 2} for 2D).
     Torch expects padding pairs [left, right, top, bottom, front, back].
 */
 
 reflection_pad1d :: proc(self: Tensor, padding: []i64) -> Tensor {
     out: Tensor
-    t.atg_reflection_pad1d(&out, self, raw_data(padding), c.int(len(padding)))
+    t.atg_reflection_pad1d(&out, self, raw_data(padding), i32(len(padding)))
     return track(out)
 }
 
 reflection_pad1d_backward :: proc(grad_output: Tensor, self: Tensor, padding: []i64) -> Tensor {
     out: Tensor
-    t.atg_reflection_pad1d_backward(&out, grad_output, self, raw_data(padding), c.int(len(padding)))
+    t.atg_reflection_pad1d_backward(&out, grad_output, self, raw_data(padding), i32(len(padding)))
     return track(out)
 }
 
 reflection_pad2d :: proc(self: Tensor, padding: []i64) -> Tensor {
     out: Tensor
-    t.atg_reflection_pad2d(&out, self, raw_data(padding), c.int(len(padding)))
+    t.atg_reflection_pad2d(&out, self, raw_data(padding), i32(len(padding)))
     return track(out)
 }
 
 reflection_pad2d_backward :: proc(grad_output: Tensor, self: Tensor, padding: []i64) -> Tensor {
     out: Tensor
-    t.atg_reflection_pad2d_backward(&out, grad_output, self, raw_data(padding), c.int(len(padding)))
+    t.atg_reflection_pad2d_backward(&out, grad_output, self, raw_data(padding), i32(len(padding)))
     return track(out)
 }
 
 reflection_pad3d :: proc(self: Tensor, padding: []i64) -> Tensor {
     out: Tensor
-    t.atg_reflection_pad3d(&out, self, raw_data(padding), c.int(len(padding)))
+    t.atg_reflection_pad3d(&out, self, raw_data(padding), i32(len(padding)))
     return track(out)
 }
 
 reflection_pad3d_backward :: proc(grad_output: Tensor, self: Tensor, padding: []i64) -> Tensor {
     out: Tensor
-    t.atg_reflection_pad3d_backward(&out, grad_output, self, raw_data(padding), c.int(len(padding)))
+    t.atg_reflection_pad3d_backward(&out, grad_output, self, raw_data(padding), i32(len(padding)))
     return track(out)
 }
 
@@ -9217,7 +9085,7 @@ renorm_ :: proc(self: Tensor, p: Scalar, dim: i64, maxnorm: Scalar) -> Tensor {
 
 repeat :: proc(self: Tensor, sizes: []i64) -> Tensor {
     out: Tensor
-    t.atg_repeat(&out, self, raw_data(sizes), c.int(len(sizes)))
+    t.atg_repeat(&out, self, raw_data(sizes), i32(len(sizes)))
     return track(out)
 }
 
@@ -9248,7 +9116,7 @@ repeat_interleave_self_tensor :: proc(self: Tensor, repeats: Tensor, dim: i64) -
 }
 
 // Equivalent to torch.repeat_interleave(repeats) -> generates tensor from repeats
-// Note: The C binding atg_repeat_interleave takes 'repeats' as the primary argument name.
+// NOTE: The C binding atg_repeat_interleave takes 'repeats' as the primary argument name.
 repeat_interleave_tensor_no_dim :: proc(repeats: Tensor) -> Tensor {
     out: Tensor
     t.atg_repeat_interleave(&out, repeats, 0, nil)
@@ -9268,55 +9136,55 @@ repeat_interleave_flat :: proc(self: Tensor, repeats: i64) -> Tensor {
 
 replication_pad1d :: proc(self: Tensor, padding: []i64) -> Tensor {
     out: Tensor
-    t.atg_replication_pad1d(&out, self, raw_data(padding), c.int(len(padding)))
+    t.atg_replication_pad1d(&out, self, raw_data(padding), i32(len(padding)))
     return track(out)
 }
 
 replication_pad1d_backward :: proc(grad_output: Tensor, self: Tensor, padding: []i64) -> Tensor {
     out: Tensor
-    t.atg_replication_pad1d_backward(&out, grad_output, self, raw_data(padding), c.int(len(padding)))
+    t.atg_replication_pad1d_backward(&out, grad_output, self, raw_data(padding), i32(len(padding)))
     return track(out)
 }
 
 replication_pad1d_backward_grad_input :: proc(grad_input: Tensor, grad_output: Tensor, self: Tensor, padding: []i64) -> Tensor {
     out: Tensor
-    t.atg_replication_pad1d_backward_grad_input(&out, grad_input, grad_output, self, raw_data(padding), c.int(len(padding)))
+    t.atg_replication_pad1d_backward_grad_input(&out, grad_input, grad_output, self, raw_data(padding), i32(len(padding)))
     return track(out)
 }
 
 replication_pad2d :: proc(self: Tensor, padding: []i64) -> Tensor {
     out: Tensor
-    t.atg_replication_pad2d(&out, self, raw_data(padding), c.int(len(padding)))
+    t.atg_replication_pad2d(&out, self, raw_data(padding), i32(len(padding)))
     return track(out)
 }
 
 replication_pad2d_backward :: proc(grad_output: Tensor, self: Tensor, padding: []i64) -> Tensor {
     out: Tensor
-    t.atg_replication_pad2d_backward(&out, grad_output, self, raw_data(padding), c.int(len(padding)))
+    t.atg_replication_pad2d_backward(&out, grad_output, self, raw_data(padding), i32(len(padding)))
     return track(out)
 }
 
 replication_pad2d_backward_grad_input :: proc(grad_input: Tensor, grad_output: Tensor, self: Tensor, padding: []i64) -> Tensor {
     out: Tensor
-    t.atg_replication_pad2d_backward_grad_input(&out, grad_input, grad_output, self, raw_data(padding), c.int(len(padding)))
+    t.atg_replication_pad2d_backward_grad_input(&out, grad_input, grad_output, self, raw_data(padding), i32(len(padding)))
     return track(out)
 }
 
 replication_pad3d :: proc(self: Tensor, padding: []i64) -> Tensor {
     out: Tensor
-    t.atg_replication_pad3d(&out, self, raw_data(padding), c.int(len(padding)))
+    t.atg_replication_pad3d(&out, self, raw_data(padding), i32(len(padding)))
     return track(out)
 }
 
 replication_pad3d_backward :: proc(grad_output: Tensor, self: Tensor, padding: []i64) -> Tensor {
     out: Tensor
-    t.atg_replication_pad3d_backward(&out, grad_output, self, raw_data(padding), c.int(len(padding)))
+    t.atg_replication_pad3d_backward(&out, grad_output, self, raw_data(padding), i32(len(padding)))
     return track(out)
 }
 
 replication_pad3d_backward_grad_input :: proc(grad_input: Tensor, grad_output: Tensor, self: Tensor, padding: []i64) -> Tensor {
     out: Tensor
-    t.atg_replication_pad3d_backward_grad_input(&out, grad_input, grad_output, self, raw_data(padding), c.int(len(padding)))
+    t.atg_replication_pad3d_backward_grad_input(&out, grad_input, grad_output, self, raw_data(padding), i32(len(padding)))
     return track(out)
 }
 
@@ -9324,7 +9192,7 @@ replication_pad3d_backward_grad_input :: proc(grad_input: Tensor, grad_output: T
 
 requires_grad_ :: proc(self: Tensor, requires_grad: bool = true) -> Tensor {
     out: Tensor
-    req_int := c.int(1) if requires_grad else c.int(0)
+    req_int := i32(1) if requires_grad else i32(0)
     t.atg_requires_grad_(&out, self, req_int)
     return self
 }
@@ -9332,7 +9200,7 @@ requires_grad_ :: proc(self: Tensor, requires_grad: bool = true) -> Tensor {
 // RESHAPE
 reshape :: proc(self: Tensor, shape: []i64) -> Tensor {
     out: Tensor
-    t.atg_reshape(&out, self, raw_data(shape), c.int(len(shape)))
+    t.atg_reshape(&out, self, raw_data(shape), i32(len(shape)))
     return track(out)
 }
 
@@ -9346,13 +9214,13 @@ reshape_as :: proc(self: Tensor, other: Tensor) -> Tensor {
 
 resize_tensor :: proc(self: Tensor, size: []i64) -> Tensor {
     out: Tensor
-    t.atg_resize(&out, self, raw_data(size), c.int(len(size)))
+    t.atg_resize(&out, self, raw_data(size), i32(len(size)))
     return track(out)
 }
 
 resize_tensor_ :: proc(self: Tensor, size: []i64) -> Tensor {
     out: Tensor
-    t.atg_resize_(&out, self, raw_data(size), c.int(len(size)))
+    t.atg_resize_(&out, self, raw_data(size), i32(len(size)))
     return self
 }
 
@@ -9408,7 +9276,7 @@ rms_norm :: proc(
         &out, 
         input, 
         raw_data(normalized_shape), 
-        c.int(len(normalized_shape)), 
+        i32(len(normalized_shape)), 
         weight, 
         eps, 
         nil
@@ -9434,13 +9302,13 @@ rnn_relu :: proc(
         input, 
         hx, 
         raw_data(params), 
-        c.int(len(params)), 
-        c.int(1) if has_biases else c.int(0),
+        i32(len(params)), 
+        i32(1) if has_biases else i32(0),
         num_layers,
         dropout,
-        c.int(1) if train else c.int(0),
-        c.int(1) if bidirectional else c.int(0),
-        c.int(1) if batch_first else c.int(0)
+        i32(1) if train else i32(0),
+        i32(1) if bidirectional else i32(0),
+        i32(1) if batch_first else i32(0)
     )
     return track(out)
 }
@@ -9461,13 +9329,13 @@ rnn_tanh :: proc(
         input, 
         hx, 
         raw_data(params), 
-        c.int(len(params)), 
-        c.int(1) if has_biases else c.int(0),
+        i32(len(params)), 
+        i32(1) if has_biases else i32(0),
         num_layers,
         dropout,
-        c.int(1) if train else c.int(0),
-        c.int(1) if bidirectional else c.int(0),
-        c.int(1) if batch_first else c.int(0)
+        i32(1) if train else i32(0),
+        i32(1) if bidirectional else i32(0),
+        i32(1) if batch_first else i32(0)
     )
     return track(out)
 }
@@ -9505,11 +9373,11 @@ rnn_relu_data :: proc(
     out: Tensor
     t.atg_rnn_relu_data(
         &out, data, batch_sizes, hx, 
-        raw_data(params), c.int(len(params)),
-        c.int(1) if has_biases else c.int(0),
+        raw_data(params), i32(len(params)),
+        i32(1) if has_biases else i32(0),
         num_layers, dropout, 
-        c.int(1) if train else c.int(0), 
-        c.int(1) if bidirectional else c.int(0)
+        i32(1) if train else i32(0), 
+        i32(1) if bidirectional else i32(0)
     )
     return track(out)
 }
@@ -9526,11 +9394,11 @@ rnn_tanh_data :: proc(
     out: Tensor
     t.atg_rnn_tanh_data(
         &out, data, batch_sizes, hx, 
-        raw_data(params), c.int(len(params)),
-        c.int(1) if has_biases else c.int(0),
+        raw_data(params), i32(len(params)),
+        i32(1) if has_biases else i32(0),
         num_layers, dropout, 
-        c.int(1) if train else c.int(0), 
-        c.int(1) if bidirectional else c.int(0)
+        i32(1) if train else i32(0), 
+        i32(1) if bidirectional else i32(0)
     )
     return track(out)
 }
@@ -9541,13 +9409,13 @@ roll :: proc(self: Tensor, shifts: []i64, dims: []i64 = nil) -> Tensor {
     out: Tensor
     // Handle dims being nil/empty by passing 0 length
     d_ptr := raw_data(dims)
-    d_len := c.int(len(dims))
+    d_len := i32(len(dims))
     
     t.atg_roll(
         &out, 
         self, 
         raw_data(shifts), 
-        c.int(len(shifts)), 
+        i32(len(shifts)), 
         d_ptr, 
         d_len
     )
@@ -9561,7 +9429,7 @@ rot90 :: proc(self: Tensor, k: i64, dims: []i64) -> Tensor {
         self, 
         k, 
         raw_data(dims), 
-        c.int(len(dims))
+        i32(len(dims))
     )
     return track(out)
 }
@@ -9608,7 +9476,7 @@ row_indices_copy :: proc(self: Tensor) -> Tensor {
 // Stacks a list of tensors along dimension 0
 row_stack :: proc(tensors: []Tensor) -> Tensor {
     out: Tensor
-    t.atg_row_stack(&out, raw_data(tensors), c.int(len(tensors)))
+    t.atg_row_stack(&out, raw_data(tensors), i32(len(tensors)))
     return track(out)
 }
 
@@ -9616,25 +9484,25 @@ row_stack :: proc(tensors: []Tensor) -> Tensor {
 
 rrelu :: proc(self: Tensor, training: bool = false) -> Tensor {
     out: Tensor
-    t.atg_rrelu(&out, self, c.int(1) if training else c.int(0))
+    t.atg_rrelu(&out, self, i32(1) if training else i32(0))
     return track(out)
 }
 
 rrelu_ :: proc(self: Tensor, training: bool = false) -> Tensor {
     out: Tensor
-    t.atg_rrelu_(&out, self, c.int(1) if training else c.int(0))
+    t.atg_rrelu_(&out, self, i32(1) if training else i32(0))
     return self
 }
 
 rrelu_with_noise :: proc(self: Tensor, noise: Tensor, training: bool = false) -> Tensor {
     out: Tensor
-    t.atg_rrelu_with_noise(&out, self, noise, c.int(1) if training else c.int(0))
+    t.atg_rrelu_with_noise(&out, self, noise, i32(1) if training else i32(0))
     return track(out)
 }
 
 rrelu_with_noise_ :: proc(self: Tensor, noise: Tensor, training: bool = false) -> Tensor {
     out: Tensor
-    t.atg_rrelu_with_noise_(&out, self, noise, c.int(1) if training else c.int(0))
+    t.atg_rrelu_with_noise_(&out, self, noise, i32(1) if training else i32(0))
     return self
 }
 
@@ -9656,8 +9524,8 @@ rrelu_with_noise_backward :: proc(
         noise, 
         lower, 
         upper, 
-        c.int(1) if training else c.int(0),
-        c.int(1) if self_is_result else c.int(0)
+        i32(1) if training else i32(0),
+        i32(1) if self_is_result else i32(0)
     )
     return track(out)
 }
@@ -9696,8 +9564,8 @@ rsub_scalar :: proc(self: Tensor, other: Scalar) -> Tensor {
 // Create a 0-dim tensor from a scalar
 scalar_tensor :: proc(
     s: Scalar, 
-    options_kind: c.int = 3, // Default common kind if unknown, or user supplies
-    options_device: c.int = 0
+    options_kind: i32 = 3, // Default common kind if unknown, or user supplies
+    options_device: i32 = 0
 ) -> Tensor {
     out: Tensor
     t.atg_scalar_tensor(&out, s, options_kind, options_device)
@@ -9744,10 +9612,10 @@ scaled_dot_product_attention :: proc(
         query, key, value,
         attn_mask,
         dropout_p,
-        c.int(1) if is_causal else c.int(0),
+        i32(1) if is_causal else i32(0),
         scale_val,
         scale_ptr,
-        c.int(1) if enable_gqa else c.int(0)
+        i32(1) if enable_gqa else i32(0)
     )
     return track(out)
 }
@@ -9799,25 +9667,25 @@ scatter_reduce_ :: proc{scatter_reduce_tensor_, scatter_reduce_value_}
 
 scatter_reduce_tensor :: proc(self: Tensor, dim: i64, index: Tensor, src: Tensor, reduce: string) -> Tensor {
     out: Tensor
-    t.atg_scatter_reduce(&out, self, dim, index, src, cstring(raw_data(reduce)), c.int(len(reduce)))
+    t.atg_scatter_reduce(&out, self, dim, index, src, cstring(raw_data(reduce)), i32(len(reduce)))
     return track(out)
 }
 
 scatter_reduce_tensor_ :: proc(self: Tensor, dim: i64, index: Tensor, src: Tensor, reduce: string) -> Tensor {
     out: Tensor
-    t.atg_scatter_reduce_(&out, self, dim, index, src, cstring(raw_data(reduce)), c.int(len(reduce)))
+    t.atg_scatter_reduce_(&out, self, dim, index, src, cstring(raw_data(reduce)), i32(len(reduce)))
     return self
 }
 
 scatter_reduce_value :: proc(self: Tensor, dim: i64, index: Tensor, value: Scalar, reduce: string) -> Tensor {
     out: Tensor
-    t.atg_scatter_value_reduce(&out, self, dim, index, value, cstring(raw_data(reduce)), c.int(len(reduce)))
+    t.atg_scatter_value_reduce(&out, self, dim, index, value, cstring(raw_data(reduce)), i32(len(reduce)))
     return track(out)
 }
 
 scatter_reduce_value_ :: proc(self: Tensor, dim: i64, index: Tensor, value: Scalar, reduce: string) -> Tensor {
     out: Tensor
-    t.atg_scatter_value_reduce_(&out, self, dim, index, value, cstring(raw_data(reduce)), c.int(len(reduce)))
+    t.atg_scatter_value_reduce_(&out, self, dim, index, value, cstring(raw_data(reduce)), i32(len(reduce)))
     return self
 }
 
@@ -9834,15 +9702,15 @@ searchsorted_tensor :: proc(
     sorter: Tensor = Tensor{} // Optional
 ) -> Tensor {
     out: Tensor
-    out_int32_i := c.int(1) if out_int32 else c.int(0)
-    right_i := c.int(1) if right else c.int(0)
+    out_int32_i := i32(1) if out_int32 else i32(0)
+    right_i := i32(1) if right else i32(0)
     
     // Side is technically nullable in C++, usually "left" or "right" if provided
     side_ptr := cstring(nil)
-    side_len := c.int(0)
+    side_len := i32(0)
     if len(side) > 0 {
         side_ptr = cstring(raw_data(side))
-        side_len = c.int(len(side))
+        side_len = i32(len(side))
     }
 
     t.atg_searchsorted(&out, sorted_sequence, self, out_int32_i, right_i, side_ptr, side_len, sorter)
@@ -9858,14 +9726,14 @@ searchsorted_scalar :: proc(
     sorter: Tensor = Tensor{} 
 ) -> Tensor {
     out: Tensor
-    out_int32_i := c.int(1) if out_int32 else c.int(0)
-    right_i := c.int(1) if right else c.int(0)
+    out_int32_i := i32(1) if out_int32 else i32(0)
+    right_i := i32(1) if right else i32(0)
     
     side_ptr := cstring(nil)
-    side_len := c.int(0)
+    side_len := i32(0)
     if len(side) > 0 {
         side_ptr = cstring(raw_data(side))
-        side_len = c.int(len(side))
+        side_len = i32(len(side))
     }
 
     t.atg_searchsorted_scalar(&out, sorted_sequence, self, out_int32_i, right_i, side_ptr, side_len, sorter)
@@ -9885,12 +9753,12 @@ segment_reduce :: proc(
     initial: Scalar = Scalar{} // Optional/Nullable often, but here defined
 ) -> Tensor {
     out: Tensor
-    unsafe_i := c.int(1) if unsafe else c.int(0)
+    unsafe_i := i32(1) if unsafe else i32(0)
     t.atg_segment_reduce(
         &out, 
         data, 
         cstring(raw_data(reduce)), 
-        c.int(len(reduce)), 
+        i32(len(reduce)), 
         lengths, 
         indices, 
         offsets, 
@@ -9921,7 +9789,7 @@ select_backward :: proc(grad_output: Tensor, input_sizes: []i64, dim: i64, index
         &out, 
         grad_output, 
         raw_data(input_sizes), 
-        c.int(len(input_sizes)), 
+        i32(len(input_sizes)), 
         dim, 
         index,
     )
@@ -9953,7 +9821,7 @@ selu_ :: proc(self: Tensor) -> Tensor {
 // Sets self to be a shallow copy of source
 set_from_source :: proc(self: Tensor, source: Tensor) -> Tensor {
     out: Tensor
-    t.atg_set(&out, self) // Note: this signature seems to imply set self to something empty or undefined? 
+    t.atg_set(&out, self) // NOTE: this signature seems to imply set self to something empty or undefined? 
     // Actually, atg_set usually sets 'self' to be equal to 'source' if passed, but the signature provided 
     // in prompt `atg_set :: proc(out: ^Tensor, self: Tensor)` is likely "self = empty".
     // However, `atg_set_source_tensor` is the explicit copy.
@@ -9974,7 +9842,7 @@ set_data :: proc(self: Tensor, new_data: Tensor) {
 
 set_requires_grad :: proc(self: Tensor, requires_grad: bool) -> Tensor {
     out: Tensor
-    r := c.int(1) if requires_grad else c.int(0)
+    r := i32(1) if requires_grad else i32(0)
     t.atg_set_requires_grad(&out, self, r)
     return track(out)
 }
@@ -10000,9 +9868,9 @@ set_storage_offset :: proc(
         source, 
         storage_offset, 
         raw_data(sizes), 
-        c.int(len(sizes)), 
+        i32(len(sizes)), 
         raw_data(strides), 
-        c.int(len(strides)),
+        i32(len(strides)),
     )
     return self
 }
@@ -10080,7 +9948,7 @@ sinh_ :: proc(self: Tensor) -> Tensor {
 }
 
 // SLOGDET: Calculates the sign and log absolute value of the determinant.
-// Note: Standard Torch returns (sign, logabsdet).
+// NOTE: Standard Torch returns (sign, logabsdet).
 // Based on the provided binding signature `out: ^Tensor`, this likely returns 
 // the tuple result wrapped in a specific way or just the primary result.
 slogdet :: proc(self: Tensor) -> Tensor {
@@ -10173,7 +10041,7 @@ slice_backward :: proc(
         &out, 
         grad_output, 
         raw_data(input_sizes), 
-        c.int(len(input_sizes)), 
+        i32(len(input_sizes)), 
         dim, 
         start, 
         end, 
@@ -10210,10 +10078,10 @@ slow_conv3d :: proc(
         &out, 
         self, 
         weight, 
-        raw_data(kernel_size), c.int(len(kernel_size)),
+        raw_data(kernel_size), i32(len(kernel_size)),
         bias, 
-        raw_data(stride), c.int(len(stride)),
-        raw_data(padding), c.int(len(padding)),
+        raw_data(stride), i32(len(stride)),
+        raw_data(padding), i32(len(padding)),
     )
     return track(out)
 }
@@ -10231,11 +10099,11 @@ slow_conv_dilated2d :: proc(
         &out, 
         self, 
         weight, 
-        raw_data(kernel_size), c.int(len(kernel_size)),
+        raw_data(kernel_size), i32(len(kernel_size)),
         bias, 
-        raw_data(stride), c.int(len(stride)),
-        raw_data(padding), c.int(len(padding)),
-        raw_data(dilation), c.int(len(dilation)),
+        raw_data(stride), i32(len(stride)),
+        raw_data(padding), i32(len(padding)),
+        raw_data(dilation), i32(len(dilation)),
     )
     return track(out)
 }
@@ -10253,11 +10121,11 @@ slow_conv_dilated3d :: proc(
         &out, 
         self, 
         weight, 
-        raw_data(kernel_size), c.int(len(kernel_size)),
+        raw_data(kernel_size), i32(len(kernel_size)),
         bias, 
-        raw_data(stride), c.int(len(stride)),
-        raw_data(padding), c.int(len(padding)),
-        raw_data(dilation), c.int(len(dilation)),
+        raw_data(stride), i32(len(stride)),
+        raw_data(padding), i32(len(padding)),
+        raw_data(dilation), i32(len(dilation)),
     )
     return track(out)
 }
@@ -10276,12 +10144,12 @@ slow_conv_transpose2d :: proc(
         &out, 
         self, 
         weight, 
-        raw_data(kernel_size), c.int(len(kernel_size)),
+        raw_data(kernel_size), i32(len(kernel_size)),
         bias, 
-        raw_data(stride), c.int(len(stride)),
-        raw_data(padding), c.int(len(padding)),
-        raw_data(output_padding), c.int(len(output_padding)),
-        raw_data(dilation), c.int(len(dilation)),
+        raw_data(stride), i32(len(stride)),
+        raw_data(padding), i32(len(padding)),
+        raw_data(output_padding), i32(len(output_padding)),
+        raw_data(dilation), i32(len(dilation)),
     )
     return track(out)
 }
@@ -10300,12 +10168,12 @@ slow_conv_transpose3d :: proc(
         &out, 
         self, 
         weight, 
-        raw_data(kernel_size), c.int(len(kernel_size)),
+        raw_data(kernel_size), i32(len(kernel_size)),
         bias, 
-        raw_data(stride), c.int(len(stride)),
-        raw_data(padding), c.int(len(padding)),
-        raw_data(output_padding), c.int(len(output_padding)),
-        raw_data(dilation), c.int(len(dilation)),
+        raw_data(stride), i32(len(stride)),
+        raw_data(padding), i32(len(padding)),
+        raw_data(output_padding), i32(len(output_padding)),
+        raw_data(dilation), i32(len(dilation)),
     )
     return track(out)
 }
@@ -10367,7 +10235,7 @@ soft_margin_loss_backward_grad_input :: proc(grad_output, self, target: Tensor, 
 
 softmax :: proc(self: Tensor, dim: i64, dtype: ScalarType) -> Tensor {
     out: Tensor
-    t.atg_softmax(&out, self, dim, c.int(dtype))
+    t.atg_softmax(&out, self, dim, i32(dtype))
     return track(out)
 }
 
@@ -10413,15 +10281,15 @@ softshrink_backward_grad_input :: proc(grad_output, self: Tensor, lambd: Scalar)
 
 sort :: proc(self: Tensor, dim: i64, descending: bool = false) -> Tensor {
     out: Tensor
-    desc_int := c.int(1) if descending else c.int(0)
+    desc_int := i32(1) if descending else i32(0)
     t.atg_sort(&out, self, dim, desc_int)
     return track(out)
 }
 
 sort_stable :: proc(self: Tensor, stable: bool, dim: i64, descending: bool = false) -> Tensor {
     out: Tensor
-    stable_int := c.int(1) if stable else c.int(0)
-    desc_int := c.int(1) if descending else c.int(0)
+    stable_int := i32(1) if stable else i32(0)
+    desc_int := i32(1) if descending else i32(0)
     t.atg_sort_stable(&out, self, stable_int, dim, desc_int)
     return track(out)
 }
@@ -10432,7 +10300,7 @@ sort_values :: proc(self: Tensor, dim: i64, descending: bool = false) -> (values
     values = new_tensor()
     indices = new_tensor()
     
-    desc_int := c.int(1) if descending else c.int(0)
+    desc_int := i32(1) if descending else i32(0)
     
     dummy: Tensor
     t.atg_sort_values(&dummy, values, indices, self, dim, desc_int)
@@ -10444,8 +10312,8 @@ sort_values_stable :: proc(self: Tensor, stable: bool, dim: i64, descending: boo
     values = new_tensor()
     indices = new_tensor()
     
-    stable_int := c.int(1) if stable else c.int(0)
-    desc_int := c.int(1) if descending else c.int(0)
+    stable_int := i32(1) if stable else i32(0)
+    desc_int := i32(1) if descending else i32(0)
     
     dummy: Tensor
     t.atg_sort_values_stable(&dummy, values, indices, self, stable_int, dim, desc_int)
@@ -10468,8 +10336,8 @@ sparse_bsc_tensor :: proc(
         ccol_indices,
         row_indices,
         values,
-        c.int(options_kind),
-        c.int(options_device),
+        i32(options_kind),
+        i32(options_device),
     )
     return track(out)
 }
@@ -10489,9 +10357,9 @@ sparse_bsc_tensor_size :: proc(
         row_indices,
         values,
         raw_data(size),
-        c.int(len(size)),
-        c.int(options_kind),
-        c.int(options_device),
+        i32(len(size)),
+        i32(options_kind),
+        i32(options_device),
     )
     return track(out)
 }
@@ -10511,8 +10379,8 @@ sparse_bsr_tensor :: proc(
         crow_indices,
         col_indices,
         values,
-        c.int(options_kind),
-        c.int(options_device),
+        i32(options_kind),
+        i32(options_device),
     )
     return track(out)
 }
@@ -10532,9 +10400,9 @@ sparse_bsr_tensor_size :: proc(
         col_indices,
         values,
         raw_data(size),
-        c.int(len(size)),
-        c.int(options_kind),
-        c.int(options_device),
+        i32(len(size)),
+        i32(options_kind),
+        i32(options_device),
     )
     return track(out)
 }
@@ -10554,8 +10422,8 @@ sparse_compressed_tensor :: proc(
         compressed_indices,
         plain_indices,
         values,
-        c.int(options_kind),
-        c.int(options_device),
+        i32(options_kind),
+        i32(options_device),
     )
     return track(out)
 }
@@ -10575,9 +10443,9 @@ sparse_compressed_tensor_size :: proc(
         plain_indices,
         values,
         raw_data(size),
-        c.int(len(size)),
-        c.int(options_kind),
-        c.int(options_device),
+        i32(len(size)),
+        i32(options_kind),
+        i32(options_device),
     )
     return track(out)
 }
@@ -10597,8 +10465,8 @@ sparse_csc_tensor :: proc(
         ccol_indices,
         row_indices,
         values,
-        c.int(options_kind),
-        c.int(options_device),
+        i32(options_kind),
+        i32(options_device),
     )
     return track(out)
 }
@@ -10618,9 +10486,9 @@ sparse_csc_tensor_size :: proc(
         row_indices,
         values,
         raw_data(size),
-        c.int(len(size)),
-        c.int(options_kind),
-        c.int(options_device),
+        i32(len(size)),
+        i32(options_kind),
+        i32(options_device),
     )
     return track(out)
 }
@@ -10640,8 +10508,8 @@ sparse_csr_tensor :: proc(
         crow_indices,
         col_indices,
         values,
-        c.int(options_kind),
-        c.int(options_device),
+        i32(options_kind),
+        i32(options_device),
     )
     return track(out)
 }
@@ -10661,9 +10529,9 @@ sparse_csr_tensor_size :: proc(
         col_indices,
         values,
         raw_data(size),
-        c.int(len(size)),
-        c.int(options_kind),
-        c.int(options_device),
+        i32(len(size)),
+        i32(options_kind),
+        i32(options_device),
     )
     return track(out)
 }
@@ -10678,9 +10546,9 @@ sparse_coo_tensor :: proc(
     t.atg_sparse_coo_tensor(
         &out,
         raw_data(size),
-        c.int(len(size)),
-        c.int(options_kind),
-        c.int(options_device),
+        i32(len(size)),
+        i32(options_kind),
+        i32(options_device),
     )
     return track(out)
 }
@@ -10694,13 +10562,13 @@ sparse_coo_tensor_indices :: proc(
     is_coalesced: bool = false,
 ) -> Tensor {
     out: Tensor
-    is_coalesced_int := c.int(1) if is_coalesced else c.int(0)
+    is_coalesced_int := i32(1) if is_coalesced else i32(0)
     t.atg_sparse_coo_tensor_indices(
         &out,
         indices,
         values,
-        c.int(options_kind),
-        c.int(options_device),
+        i32(options_kind),
+        i32(options_device),
         is_coalesced_int,
     )
     return track(out)
@@ -10716,15 +10584,15 @@ sparse_coo_tensor_indices_size :: proc(
     is_coalesced: bool = false,
 ) -> Tensor {
     out: Tensor
-    is_coalesced_int := c.int(1) if is_coalesced else c.int(0)
+    is_coalesced_int := i32(1) if is_coalesced else i32(0)
     t.atg_sparse_coo_tensor_indices_size(
         &out,
         indices,
         values,
         raw_data(size),
-        c.int(len(size)),
-        c.int(options_kind),
-        c.int(options_device),
+        i32(len(size)),
+        i32(options_kind),
+        i32(options_device),
         is_coalesced_int,
     )
     return track(out)
@@ -10760,7 +10628,7 @@ sparse_resize :: proc(
         &out,
         self,
         raw_data(size),
-        c.int(len(size)),
+        i32(len(size)),
         sparse_dim,
         dense_dim,
     )
@@ -10779,7 +10647,7 @@ sparse_resize_ :: proc(
         &out,
         self,
         raw_data(size),
-        c.int(len(size)),
+        i32(len(size)),
         sparse_dim,
         dense_dim,
     )
@@ -10798,7 +10666,7 @@ sparse_resize_and_clear :: proc(
         &out,
         self,
         raw_data(size),
-        c.int(len(size)),
+        i32(len(size)),
         sparse_dim,
         dense_dim,
     )
@@ -10817,7 +10685,7 @@ sparse_resize_and_clear_ :: proc(
         &out,
         self,
         raw_data(size),
-        c.int(len(size)),
+        i32(len(size)),
         sparse_dim,
         dense_dim,
     )
@@ -11186,7 +11054,7 @@ special_log_ndtr :: proc(self: Tensor) -> Tensor {
 
 special_log_softmax :: proc(self: Tensor, dim: i64, dtype: ScalarType) -> Tensor {
     out: Tensor
-    t.atg_special_log_softmax(&out, self, dim, c.int(dtype))
+    t.atg_special_log_softmax(&out, self, dim, i32(dtype))
     return track(out)
 }
 
@@ -11203,8 +11071,8 @@ special_logit :: proc(self: Tensor, eps: f64) -> Tensor {
 
 special_logsumexp :: proc(self: Tensor, dim: []i64, keepdim: bool = false) -> Tensor {
     out: Tensor
-    keep_int := c.int(1) if keepdim else c.int(0)
-    t.atg_special_logsumexp(&out, self, raw_data(dim), c.int(len(dim)), keep_int)
+    keep_int := i32(1) if keepdim else i32(0)
+    t.atg_special_logsumexp(&out, self, raw_data(dim), i32(len(dim)), keep_int)
     return track(out)
 }
 
@@ -11285,7 +11153,7 @@ special_sinc :: proc(self: Tensor) -> Tensor {
 
 special_softmax :: proc(self: Tensor, dim: i64, dtype: ScalarType) -> Tensor {
     out: Tensor
-    t.atg_special_softmax(&out, self, dim, c.int(dtype))
+    t.atg_special_softmax(&out, self, dim, i32(dtype))
     return track(out)
 }
 
@@ -11513,7 +11381,7 @@ squeeze_dim :: proc(self: Tensor, dim: i64) -> Tensor {
 
 squeeze_dims :: proc(self: Tensor, dims: []i64) -> Tensor {
     out: Tensor
-    t.atg_squeeze_dims(&out, self, raw_data(dims), c.int(len(dims)))
+    t.atg_squeeze_dims(&out, self, raw_data(dims), i32(len(dims)))
     return track(out)
 }
 
@@ -11531,7 +11399,7 @@ squeeze_dim_ :: proc(self: Tensor, dim: i64) -> Tensor {
 
 squeeze_dims_ :: proc(self: Tensor, dims: []i64) -> Tensor {
     dummy: Tensor
-    t.atg_squeeze_dims_(&dummy, self, raw_data(dims), c.int(len(dims)))
+    t.atg_squeeze_dims_(&dummy, self, raw_data(dims), i32(len(dims)))
     return self
 }
 
@@ -11551,7 +11419,7 @@ squeeze_copy_dim :: proc(self: Tensor, dim: i64) -> Tensor {
 
 squeeze_copy_dims :: proc(self: Tensor, dims: []i64) -> Tensor {
     out: Tensor
-    t.atg_squeeze_copy_dims(&out, self, raw_data(dims), c.int(len(dims)))
+    t.atg_squeeze_copy_dims(&out, self, raw_data(dims), i32(len(dims)))
     return track(out)
 }
 
@@ -11568,7 +11436,7 @@ sspaddmm :: proc(self, mat1, mat2: Tensor) -> Tensor {
 
 stack :: proc(tensors: []Tensor, dim: i64 = 0) -> Tensor {
     out: Tensor
-    t.atg_stack(&out, raw_data(tensors), c.int(len(tensors)), dim)
+    t.atg_stack(&out, raw_data(tensors), i32(len(tensors)), dim)
     return track(out)
 }
 
@@ -11579,60 +11447,60 @@ std_mean :: proc{std_mean_all, std_mean_dim}
 
 std_all :: proc(self: Tensor, unbiased: bool = true) -> Tensor {
     out: Tensor
-    u_int := c.int(1) if unbiased else c.int(0)
+    u_int := i32(1) if unbiased else i32(0)
     t.atg_std(&out, self, u_int)
     return track(out)
 }
 
 std_dim :: proc(self: Tensor, dims: []i64, unbiased: bool = true, keepdim: bool = false) -> Tensor {
     out: Tensor
-    u_int := c.int(1) if unbiased else c.int(0)
-    k_int := c.int(1) if keepdim else c.int(0)
+    u_int := i32(1) if unbiased else i32(0)
+    k_int := i32(1) if keepdim else i32(0)
     
-    t.atg_std_dim(&out, self, raw_data(dims), c.int(len(dims)), u_int, k_int)
+    t.atg_std_dim(&out, self, raw_data(dims), i32(len(dims)), u_int, k_int)
     return track(out)
 }
 
 std_correction :: proc(self: Tensor, dims: []i64, correction: Scalar, keepdim: bool = false) -> Tensor {
     out: Tensor
-    k_int := c.int(1) if keepdim else c.int(0)
+    k_int := i32(1) if keepdim else i32(0)
     
-    t.atg_std_correction(&out, self, raw_data(dims), c.int(len(dims)), correction, k_int)
+    t.atg_std_correction(&out, self, raw_data(dims), i32(len(dims)), correction, k_int)
     return track(out)
 }
 
-// Note: Standard PyTorch std_mean returns a tuple (std, mean).
+// NOTE: Standard PyTorch std_mean returns a tuple (std, mean).
 // The provided signature for atg_std_mean takes a single 'out' pointer.
 // We implement it returning a single Tensor here to match the provided signature,
 // but be aware this may only return the 'std' component depending on the underlying C wrapper generation.
 
 std_mean_all :: proc(self: Tensor, unbiased: bool = true) -> Tensor {
     out: Tensor
-    u_int := c.int(1) if unbiased else c.int(0)
+    u_int := i32(1) if unbiased else i32(0)
     t.atg_std_mean(&out, self, u_int)
     return track(out)
 }
 
 std_mean_dim :: proc(self: Tensor, dims: []i64, unbiased: bool = true, keepdim: bool = false) -> Tensor {
     out: Tensor
-    u_int := c.int(1) if unbiased else c.int(0)
-    k_int := c.int(1) if keepdim else c.int(0)
+    u_int := i32(1) if unbiased else i32(0)
+    k_int := i32(1) if keepdim else i32(0)
     
-    t.atg_std_mean_dim(&out, self, raw_data(dims), c.int(len(dims)), u_int, k_int)
+    t.atg_std_mean_dim(&out, self, raw_data(dims), i32(len(dims)), u_int, k_int)
     return track(out)
 }
 
 std_mean_correction :: proc(self: Tensor, dims: []i64, correction: Scalar, keepdim: bool = false) -> Tensor {
     out: Tensor
-    k_int := c.int(1) if keepdim else c.int(0)
+    k_int := i32(1) if keepdim else i32(0)
     
-    t.atg_std_mean_correction(&out, self, raw_data(dims), c.int(len(dims)), correction, k_int)
+    t.atg_std_mean_correction(&out, self, raw_data(dims), i32(len(dims)), correction, k_int)
     return track(out)
 }
 
 // SPECTRAL OPERATIONS (STFT)
 
-/* Note on hop_length/win_length pointers:
+/* NOTE on hop_length/win_length pointers:
    The C bindings accept a value (_v) and a generic pointer (_null).
    We pass 'nil' to the pointer args, assuming the integer values provided 
    are valid.
@@ -11651,10 +11519,10 @@ stft :: proc(
 ) -> Tensor {
     out: Tensor
     
-    norm_int := c.int(1) if normalized else c.int(0)
-    one_int  := c.int(1) if onesided else c.int(0)
-    cplx_int := c.int(1) if return_complex else c.int(0)
-    align_int := c.int(1) if align_to_window else c.int(0)
+    norm_int := i32(1) if normalized else i32(0)
+    one_int  := i32(1) if onesided else i32(0)
+    cplx_int := i32(1) if return_complex else i32(0)
+    align_int := i32(1) if align_to_window else i32(0)
 
     t.atg_stft(
         &out, 
@@ -11686,11 +11554,11 @@ stft_center :: proc(
 ) -> Tensor {
     out: Tensor
     
-    center_int := c.int(1) if center else c.int(0)
-    norm_int := c.int(1) if normalized else c.int(0)
-    one_int  := c.int(1) if onesided else c.int(0)
-    cplx_int := c.int(1) if return_complex else c.int(0)
-    align_int := c.int(1) if align_to_window else c.int(0)
+    center_int := i32(1) if center else i32(0)
+    norm_int := i32(1) if normalized else i32(0)
+    one_int  := i32(1) if onesided else i32(0)
+    cplx_int := i32(1) if return_complex else i32(0)
+    align_int := i32(1) if align_to_window else i32(0)
 
     // Convert Odin string to C string using temp allocator
     pad_cstr := strings.clone_to_cstring(pad_mode, context.temp_allocator)
@@ -11704,7 +11572,7 @@ stft_center :: proc(
         window, 
         center_int,
         pad_cstr,
-        c.int(len(pad_mode)),
+        i32(len(pad_mode)),
         norm_int, 
         one_int, 
         cplx_int, 
@@ -11776,7 +11644,7 @@ subtract_scalar_ :: proc(self: Tensor, other: Scalar) -> Tensor {
 // Sum of all elements
 sum :: proc(self: Tensor, dtype: ScalarType = ScalarType.Float) -> Tensor {
     out: Tensor
-    t.atg_sum(&out, self, c.int(dtype))
+    t.atg_sum(&out, self, i32(dtype))
     return track(out)
 }
 
@@ -11788,15 +11656,15 @@ sum_dim :: proc(
     dtype: ScalarType = ScalarType.Float
 ) -> Tensor {
     out: Tensor
-    keep_int := c.int(1) if keepdim else c.int(0)
+    keep_int := i32(1) if keepdim else i32(0)
     
     t.atg_sum_dim_intlist(
         &out, 
         self, 
         raw_data(dims), 
-        c.int(len(dims)), 
+        i32(len(dims)), 
         keep_int, 
-        c.int(dtype)
+        i32(dtype)
     )
     return track(out)
 }
@@ -11804,7 +11672,7 @@ sum_dim :: proc(
 // Sum to a specific shape (broadcasting reduction)
 sum_to_size :: proc(self: Tensor, size: []i64) -> Tensor {
     out: Tensor
-    t.atg_sum_to_size(&out, self, raw_data(size), c.int(len(size)))
+    t.atg_sum_to_size(&out, self, raw_data(size), i32(len(size)))
     return track(out)
 }
 
@@ -11825,8 +11693,8 @@ svd :: proc(self: Tensor, some: bool = true, compute_uv: bool = true) -> (u, s, 
         s, 
         v, 
         self, 
-        c.int(1) if some else c.int(0), 
-        c.int(1) if compute_uv else c.int(0)
+        i32(1) if some else i32(0), 
+        i32(1) if compute_uv else i32(0)
     )
     return u, s, v
 }
@@ -11912,7 +11780,7 @@ tanh_backward_grad_input :: proc(grad_input: Tensor, grad_output: Tensor, output
     return track(out)
 }
 
-// TENSORDOT
+// TENSOR
 
 tensordot :: proc(self, other: Tensor, dims_self: []i64, dims_other: []i64) -> Tensor {
     out: Tensor
@@ -11921,9 +11789,9 @@ tensordot :: proc(self, other: Tensor, dims_self: []i64, dims_other: []i64) -> T
         self, 
         other, 
         raw_data(dims_self), 
-        c.int(len(dims_self)), 
+        i32(len(dims_self)), 
         raw_data(dims_other), 
-        c.int(len(dims_other)),
+        i32(len(dims_other)),
     )
     return track(out)
 }
@@ -11952,7 +11820,7 @@ threshold_backward :: proc(grad_output: Tensor, self: Tensor, threshold_val: Sca
 
 tile :: proc(self: Tensor, dims: []i64) -> Tensor {
     out: Tensor
-    t.atg_tile(&out, self, raw_data(dims), c.int(len(dims)))
+    t.atg_tile(&out, self, raw_data(dims), i32(len(dims)))
     return track(out)
 }
 
@@ -11961,33 +11829,33 @@ tile :: proc(self: Tensor, dims: []i64) -> Tensor {
 // Moves tensor to a specific device index (e.g., 0 for CUDA:0, -1 for CPU typically)
 to_device :: proc(self: Tensor, device: int, dtype: ScalarType, non_blocking: bool = false, copy: bool = false) -> Tensor {
     out: Tensor
-    nb := c.int(1) if non_blocking else c.int(0)
-    cp := c.int(1) if copy else c.int(0)
+    nb := i32(1) if non_blocking else i32(0)
+    cp := i32(1) if copy else i32(0)
     
-    t.atg_to_device(&out, self, c.int(device), c.int(dtype), nb, cp)
+    t.atg_to_device(&out, self, i32(device), i32(dtype), nb, cp)
     return track(out)
 }
 
 // Simple alias for standard .to(device_index)
 to_index :: proc(self: Tensor, device: int) -> Tensor {
     out: Tensor
-    t.atg_to(&out, self, c.int(device))
+    t.atg_to(&out, self, i32(device))
     return track(out)
 }
 
 to_dtype :: proc(self: Tensor, dtype: ScalarType, non_blocking: bool = false, copy: bool = false) -> Tensor {
     out: Tensor
-    nb := c.int(1) if non_blocking else c.int(0)
-    cp := c.int(1) if copy else c.int(0)
+    nb := i32(1) if non_blocking else i32(0)
+    cp := i32(1) if copy else i32(0)
 
-    t.atg_to_dtype(&out, self, c.int(dtype), nb, cp)
+    t.atg_to_dtype(&out, self, i32(dtype), nb, cp)
     return track(out)
 }
 
 to_other :: proc(self: Tensor, other: Tensor, non_blocking: bool = false, copy: bool = false) -> Tensor {
     out: Tensor
-    nb := c.int(1) if non_blocking else c.int(0)
-    cp := c.int(1) if copy else c.int(0)
+    nb := i32(1) if non_blocking else i32(0)
+    cp := i32(1) if copy else i32(0)
 
     t.atg_to_other(&out, self, other, nb, cp)
     return track(out)
@@ -11997,26 +11865,26 @@ to_other :: proc(self: Tensor, other: Tensor, non_blocking: bool = false, copy: 
 
 to_dense :: proc(self: Tensor, dtype: ScalarType, masked_grad: bool = false) -> Tensor {
     out: Tensor
-    masked_grad_int := c.int(1) if masked_grad else c.int(0)
+    masked_grad_int := i32(1) if masked_grad else i32(0)
     
-    t.atg__to_dense(&out, self, c.int(dtype), masked_grad_int)
+    t.atg__to_dense(&out, self, i32(dtype), masked_grad_int)
     return track(out)
 }
 
 to_mkldnn :: proc(self: Tensor, dtype: ScalarType) -> Tensor {
     out: Tensor
-    t.atg_to_mkldnn(&out, self, c.int(dtype))
+    t.atg_to_mkldnn(&out, self, i32(dtype))
     return track(out)
 }
 
 to_padded_tensor :: proc(self: Tensor, padding: f64, output_size: []i64) -> Tensor {
     out: Tensor
-    t.atg_to_padded_tensor(&out, self, padding, raw_data(output_size), c.int(len(output_size)))
+    t.atg_to_padded_tensor(&out, self, padding, raw_data(output_size), i32(len(output_size)))
     return track(out)
 }
 
 // SPARSE CONVERSIONS
-// Note: dense_dim arguments in C bindings often accept a null pointer to indicate "default/inferred".
+// NOTE: dense_dim arguments in C bindings often accept a null pointer to indicate "default/inferred".
 // We use a helper `val_or_null` strategy here.
 
 to_sparse :: proc(self: Tensor, sparse_dim: i64) -> Tensor {
@@ -12077,7 +11945,7 @@ to_sparse_bsr :: proc(self: Tensor, blocksize: []i64, dense_dim: Maybe(i64) = ni
         dd_ptr = rawptr(uintptr(1))
     }
 
-    t.atg_to_sparse_bsr(&out, self, raw_data(blocksize), c.int(len(blocksize)), dd_val, dd_ptr)
+    t.atg_to_sparse_bsr(&out, self, raw_data(blocksize), i32(len(blocksize)), dd_val, dd_ptr)
     return track(out)
 }
 
@@ -12091,7 +11959,7 @@ to_sparse_bsc :: proc(self: Tensor, blocksize: []i64, dense_dim: Maybe(i64) = ni
         dd_ptr = rawptr(uintptr(1))
     }
 
-    t.atg_to_sparse_bsc(&out, self, raw_data(blocksize), c.int(len(blocksize)), dd_val, dd_ptr)
+    t.atg_to_sparse_bsc(&out, self, raw_data(blocksize), i32(len(blocksize)), dd_val, dd_ptr)
     return track(out)
 }
 
@@ -12101,8 +11969,8 @@ topk :: proc(self: Tensor, k: i64, dim: i64 = -1, largest: bool = true, sorted: 
     values = new_tensor()
     indices = new_tensor()
     
-    l_int := c.int(1) if largest else c.int(0)
-    s_int := c.int(1) if sorted else c.int(0)
+    l_int := i32(1) if largest else i32(0)
+    s_int := i32(1) if sorted else i32(0)
     
     // We use the `_values` variant which acts as the `_out` variant for the tuple components
     dummy: Tensor
@@ -12115,7 +11983,7 @@ topk :: proc(self: Tensor, k: i64, dim: i64 = -1, largest: bool = true, sorted: 
 
 totype :: proc(self: Tensor, scalar_type: ScalarType) -> Tensor {
     out: Tensor
-    t.atg_totype(&out, self, c.int(scalar_type))
+    t.atg_totype(&out, self, i32(scalar_type))
     return track(out)
 }
 
@@ -12133,7 +12001,7 @@ trace_backward :: proc(grad: Tensor, sizes: []i64) -> Tensor {
         &out, 
         grad, 
         raw_data(sizes), 
-        c.int(len(sizes)),
+        i32(len(sizes)),
     )
     return track(out)
 }
@@ -12227,7 +12095,7 @@ trapz_scalar_dx :: proc(y: Tensor, dx: f64, dim: i64) -> Tensor {
 // TRIANGULAR SOLVE
 
 // Returns the solution tensor.
-// Note: PyTorch usually returns a tuple (solution, cloned_A). 
+// NOTE: PyTorch usually returns a tuple (solution, cloned_A). 
 // The C-binding 'out' here captures the result handle.
 triangular_solve :: proc(
     self: Tensor, 
@@ -12241,9 +12109,9 @@ triangular_solve :: proc(
         &out, 
         self, 
         A, 
-        c.int(upper), 
-        c.int(transpose), 
-        c.int(unitriangular),
+        i32(upper), 
+        i32(transpose), 
+        i32(unitriangular),
     )
     return track(out)
 }
@@ -12265,16 +12133,16 @@ triangular_solve_buffers :: proc(
         M, 
         self, 
         A, 
-        c.int(upper), 
-        c.int(transpose), 
-        c.int(unitriangular),
+        i32(upper), 
+        i32(transpose), 
+        i32(unitriangular),
     )
     return track(out)
 }
 
 // TRIL (Triangle Lower)
 
-tril_new :: proc(self: Tensor, diagonal: i64 = 0) -> Tensor {
+tril:: proc(self: Tensor, diagonal: i64 = 0) -> Tensor {
     out: Tensor
     t.atg_tril(&out, self, diagonal)
     return track(out)
@@ -12299,15 +12167,15 @@ tril_indices :: proc(
         row, 
         col, 
         offset, 
-        c.int(options_kind), 
-        c.int(options_device),
+        i32(options_kind), 
+        i32(options_device),
     )
     return track(out)
 }
 
 // TRIU (Triangle Upper)
 
-triu_new :: proc(self: Tensor, diagonal: i64 = 0) -> Tensor {
+triu:: proc(self: Tensor, diagonal: i64 = 0) -> Tensor {
     out: Tensor
     t.atg_triu(&out, self, diagonal)
     return track(out)
@@ -12332,8 +12200,8 @@ triu_indices :: proc(
         row, 
         col, 
         offset, 
-        c.int(options_kind), 
-        c.int(options_device),
+        i32(options_kind), 
+        i32(options_device),
     )
     return track(out)
 }
@@ -12357,7 +12225,7 @@ triplet_margin_loss :: proc(
         margin, 
         p, 
         eps, 
-        c.int(swap), 
+        i32(swap), 
         reduction,
     )
     return track(out)
@@ -12394,7 +12262,7 @@ true_divide_scalar_ :: proc(self: Tensor, other: Scalar) -> Tensor {
 
 // TRUNC
 
-trunc_new :: proc(self: Tensor) -> Tensor {
+trunc:: proc(self: Tensor) -> Tensor {
     out: Tensor
     t.atg_trunc(&out, self)
     return track(out)
@@ -12423,14 +12291,14 @@ unflatten :: proc(self: Tensor, dim: i64, sizes: []i64) -> Tensor {
         self, 
         dim, 
         raw_data(sizes), 
-        c.int(len(sizes)),
+        i32(len(sizes)),
     )
     return track(out)
 }
 
 // UNFOLD
 
-unfold_new :: proc(self: Tensor, dimension: i64, size: i64, step: i64) -> Tensor {
+unfold:: proc(self: Tensor, dimension: i64, size: i64, step: i64) -> Tensor {
     out: Tensor
     t.atg_unfold(&out, self, dimension, size, step)
     return track(out)
@@ -12454,7 +12322,7 @@ unfold_backward :: proc(
         &out, 
         grad_in, 
         raw_data(input_sizes), 
-        c.int(len(input_sizes)),
+        i32(len(input_sizes)),
         dim,
         size,
         step,
@@ -12464,7 +12332,7 @@ unfold_backward :: proc(
 
 // UNIFORM
 
-uniform_new :: proc(self: Tensor, from: f64 = 0.0, to: f64 = 1.0) -> Tensor {
+uniform:: proc(self: Tensor, from: f64 = 0.0, to: f64 = 1.0) -> Tensor {
     out: Tensor
     t.atg_uniform(&out, self, from, to)
     return track(out)
@@ -12498,8 +12366,8 @@ unique_consecutive :: proc(
     t.atg_unique_consecutive(
         &out, 
         self, 
-        c.int(return_inverse), 
-        c.int(return_counts), 
+        i32(return_inverse), 
+        i32(return_counts), 
         dim_val, 
         dim_ptr, 
     )
@@ -12518,9 +12386,9 @@ unique_dim :: proc(
         &out, 
         self, 
         dim, 
-        c.int(sorted), 
-        c.int(return_inverse), 
-        c.int(return_counts),
+        i32(sorted), 
+        i32(return_inverse), 
+        i32(return_counts),
     )
     return track(out)
 }
@@ -12536,15 +12404,15 @@ unique_dim_consecutive :: proc(
         &out, 
         self, 
         dim, 
-        c.int(return_inverse), 
-        c.int(return_counts),
+        i32(return_inverse), 
+        i32(return_counts),
     )
     return track(out)
 }
 
 // UNSQUEEZE
 
-unsqueeze_new :: proc(self: Tensor, dim: i64) -> Tensor {
+unsqueeze:: proc(self: Tensor, dim: i64) -> Tensor {
     out: Tensor
     t.atg_unsqueeze(&out, self, dim)
     return track(out)
@@ -12594,8 +12462,8 @@ upsample_bicubic2d :: proc(
         &out, 
         self, 
         raw_data(output_size), 
-        c.int(len(output_size)), 
-        c.int(1) if align_corners else c.int(0),
+        i32(len(output_size)), 
+        i32(1) if align_corners else i32(0),
         sh_v, sh_null,
         sw_v, sw_null,
     )
@@ -12618,9 +12486,9 @@ upsample_bicubic2d_backward :: proc(
     t.atg_upsample_bicubic2d_backward(
         &out, 
         grad_output, 
-        raw_data(output_size), c.int(len(output_size)),
-        raw_data(input_size),  c.int(len(input_size)),
-        c.int(1) if align_corners else c.int(0),
+        raw_data(output_size), i32(len(output_size)),
+        raw_data(input_size),  i32(len(input_size)),
+        i32(1) if align_corners else i32(0),
         sh_v, sh_null,
         sw_v, sw_null,
     )
@@ -12645,9 +12513,9 @@ upsample_bicubic2d_backward_grad_input :: proc(
         &out,
         grad_input,
         grad_output,
-        raw_data(output_size), c.int(len(output_size)),
-        raw_data(input_size),  c.int(len(input_size)),
-        c.int(1) if align_corners else c.int(0),
+        raw_data(output_size), i32(len(output_size)),
+        raw_data(input_size),  i32(len(input_size)),
+        i32(1) if align_corners else i32(0),
         sh_v, sh_null,
         sw_v, sw_null,
     )
@@ -12664,9 +12532,9 @@ upsample_bicubic2d_vec :: proc(
     t.atg_upsample_bicubic2d_vec(
         &out,
         input,
-        raw_data(output_size), c.int(len(output_size)),
-        c.int(1) if align_corners else c.int(0),
-        raw_data(scale_factors), c.int(len(scale_factors)),
+        raw_data(output_size), i32(len(output_size)),
+        i32(1) if align_corners else i32(0),
+        raw_data(scale_factors), i32(len(scale_factors)),
     )
     return track(out)
 }
@@ -12688,8 +12556,8 @@ upsample_bilinear2d :: proc(
     t.atg_upsample_bilinear2d(
         &out, 
         self, 
-        raw_data(output_size), c.int(len(output_size)), 
-        c.int(1) if align_corners else c.int(0),
+        raw_data(output_size), i32(len(output_size)), 
+        i32(1) if align_corners else i32(0),
         sh_v, sh_null,
         sw_v, sw_null,
     )
@@ -12712,9 +12580,9 @@ upsample_bilinear2d_backward :: proc(
     t.atg_upsample_bilinear2d_backward(
         &out, 
         grad_output, 
-        raw_data(output_size), c.int(len(output_size)),
-        raw_data(input_size),  c.int(len(input_size)),
-        c.int(1) if align_corners else c.int(0),
+        raw_data(output_size), i32(len(output_size)),
+        raw_data(input_size),  i32(len(input_size)),
+        i32(1) if align_corners else i32(0),
         sh_v, sh_null,
         sw_v, sw_null,
     )
@@ -12739,9 +12607,9 @@ upsample_bilinear2d_backward_grad_input :: proc(
         &out,
         grad_input,
         grad_output,
-        raw_data(output_size), c.int(len(output_size)),
-        raw_data(input_size),  c.int(len(input_size)),
-        c.int(1) if align_corners else c.int(0),
+        raw_data(output_size), i32(len(output_size)),
+        raw_data(input_size),  i32(len(input_size)),
+        i32(1) if align_corners else i32(0),
         sh_v, sh_null,
         sw_v, sw_null,
     )
@@ -12758,9 +12626,9 @@ upsample_bilinear2d_vec :: proc(
     t.atg_upsample_bilinear2d_vec(
         &out,
         input,
-        raw_data(output_size), c.int(len(output_size)),
-        c.int(1) if align_corners else c.int(0),
-        raw_data(scale_factors), c.int(len(scale_factors)),
+        raw_data(output_size), i32(len(output_size)),
+        i32(1) if align_corners else i32(0),
+        raw_data(scale_factors), i32(len(scale_factors)),
     )
     return track(out)
 }
@@ -12780,8 +12648,8 @@ upsample_linear1d :: proc(
     t.atg_upsample_linear1d(
         &out, 
         self, 
-        raw_data(output_size), c.int(len(output_size)), 
-        c.int(1) if align_corners else c.int(0),
+        raw_data(output_size), i32(len(output_size)), 
+        i32(1) if align_corners else i32(0),
         s_v, s_null,
     )
     return track(out)
@@ -12801,9 +12669,9 @@ upsample_linear1d_backward :: proc(
     t.atg_upsample_linear1d_backward(
         &out, 
         grad_output, 
-        raw_data(output_size), c.int(len(output_size)),
-        raw_data(input_size),  c.int(len(input_size)),
-        c.int(1) if align_corners else c.int(0),
+        raw_data(output_size), i32(len(output_size)),
+        raw_data(input_size),  i32(len(input_size)),
+        i32(1) if align_corners else i32(0),
         s_v, s_null,
     )
     return track(out)
@@ -12825,9 +12693,9 @@ upsample_linear1d_backward_grad_input :: proc(
         &out,
         grad_input,
         grad_output,
-        raw_data(output_size), c.int(len(output_size)),
-        raw_data(input_size),  c.int(len(input_size)),
-        c.int(1) if align_corners else c.int(0),
+        raw_data(output_size), i32(len(output_size)),
+        raw_data(input_size),  i32(len(input_size)),
+        i32(1) if align_corners else i32(0),
         s_v, s_null,
     )
     return track(out)
@@ -12843,9 +12711,9 @@ upsample_linear1d_vec :: proc(
     t.atg_upsample_linear1d_vec(
         &out,
         input,
-        raw_data(output_size), c.int(len(output_size)),
-        c.int(1) if align_corners else c.int(0),
-        raw_data(scale_factors), c.int(len(scale_factors)),
+        raw_data(output_size), i32(len(output_size)),
+        i32(1) if align_corners else i32(0),
+        raw_data(scale_factors), i32(len(scale_factors)),
     )
     return track(out)
 }
@@ -12863,7 +12731,7 @@ upsample_nearest1d :: proc(
     t.atg_upsample_nearest1d(
         &out, 
         self, 
-        raw_data(output_size), c.int(len(output_size)), 
+        raw_data(output_size), i32(len(output_size)), 
         s_v, s_null,
     )
     return track(out)
@@ -12881,8 +12749,8 @@ upsample_nearest1d_backward :: proc(
     t.atg_upsample_nearest1d_backward(
         &out, 
         grad_output, 
-        raw_data(output_size), c.int(len(output_size)), 
-        raw_data(input_size),  c.int(len(input_size)), 
+        raw_data(output_size), i32(len(output_size)), 
+        raw_data(input_size),  i32(len(input_size)), 
         s_v, s_null,
     )
     return track(out)
@@ -12902,8 +12770,8 @@ upsample_nearest1d_backward_grad_input :: proc(
         &out, 
         grad_input, 
         grad_output, 
-        raw_data(output_size), c.int(len(output_size)), 
-        raw_data(input_size),  c.int(len(input_size)), 
+        raw_data(output_size), i32(len(output_size)), 
+        raw_data(input_size),  i32(len(input_size)), 
         s_v, s_null,
     )
     return track(out)
@@ -12924,7 +12792,7 @@ upsample_nearest2d :: proc(
     t.atg_upsample_nearest2d(
         &out, 
         self, 
-        raw_data(output_size), c.int(len(output_size)), 
+        raw_data(output_size), i32(len(output_size)), 
         sh_v, sh_null,
         sw_v, sw_null,
     )
@@ -12945,8 +12813,8 @@ upsample_nearest2d_backward :: proc(
     t.atg_upsample_nearest2d_backward(
         &out, 
         grad_output, 
-        raw_data(output_size), c.int(len(output_size)), 
-        raw_data(input_size),  c.int(len(input_size)), 
+        raw_data(output_size), i32(len(output_size)), 
+        raw_data(input_size),  i32(len(input_size)), 
         sh_v, sh_null,
         sw_v, sw_null,
     )
@@ -12969,8 +12837,8 @@ upsample_nearest2d_backward_grad_input :: proc(
         &out, 
         grad_input, 
         grad_output, 
-        raw_data(output_size), c.int(len(output_size)), 
-        raw_data(input_size),  c.int(len(input_size)), 
+        raw_data(output_size), i32(len(output_size)), 
+        raw_data(input_size),  i32(len(input_size)), 
         sh_v, sh_null,
         sw_v, sw_null,
     )
@@ -12994,7 +12862,7 @@ upsample_nearest3d :: proc(
     t.atg_upsample_nearest3d(
         &out, 
         self, 
-        raw_data(output_size), c.int(len(output_size)), 
+        raw_data(output_size), i32(len(output_size)), 
         sd_v, sd_null,
         sh_v, sh_null,
         sw_v, sw_null,
@@ -13018,8 +12886,8 @@ upsample_nearest3d_backward :: proc(
     t.atg_upsample_nearest3d_backward(
         &out, 
         grad_output, 
-        raw_data(output_size), c.int(len(output_size)), 
-        raw_data(input_size),  c.int(len(input_size)), 
+        raw_data(output_size), i32(len(output_size)), 
+        raw_data(input_size),  i32(len(input_size)), 
         sd_v, sd_null,
         sh_v, sh_null,
         sw_v, sw_null,
@@ -13045,8 +12913,8 @@ upsample_nearest3d_backward_grad_input :: proc(
         &out, 
         grad_input, 
         grad_output, 
-        raw_data(output_size), c.int(len(output_size)), 
-        raw_data(input_size),  c.int(len(input_size)), 
+        raw_data(output_size), i32(len(output_size)), 
+        raw_data(input_size),  i32(len(input_size)), 
         sd_v, sd_null,
         sh_v, sh_null,
         sw_v, sw_null,
@@ -13072,8 +12940,8 @@ upsample_trilinear3d :: proc(
     t.atg_upsample_trilinear3d(
         &out, 
         self, 
-        raw_data(output_size), c.int(len(output_size)), 
-        c.int(1) if align_corners else c.int(0),
+        raw_data(output_size), i32(len(output_size)), 
+        i32(1) if align_corners else i32(0),
         sd_v, sd_null,
         sh_v, sh_null,
         sw_v, sw_null,
@@ -13098,9 +12966,9 @@ upsample_trilinear3d_backward :: proc(
     t.atg_upsample_trilinear3d_backward(
         &out, 
         grad_output, 
-        raw_data(output_size), c.int(len(output_size)), 
-        raw_data(input_size),  c.int(len(input_size)), 
-        c.int(1) if align_corners else c.int(0),
+        raw_data(output_size), i32(len(output_size)), 
+        raw_data(input_size),  i32(len(input_size)), 
+        i32(1) if align_corners else i32(0),
         sd_v, sd_null,
         sh_v, sh_null,
         sw_v, sw_null,
@@ -13127,9 +12995,9 @@ upsample_trilinear3d_backward_grad_input :: proc(
         &out, 
         grad_input, 
         grad_output, 
-        raw_data(output_size), c.int(len(output_size)), 
-        raw_data(input_size),  c.int(len(input_size)), 
-        c.int(1) if align_corners else c.int(0),
+        raw_data(output_size), i32(len(output_size)), 
+        raw_data(input_size),  i32(len(input_size)), 
+        i32(1) if align_corners else i32(0),
         sd_v, sd_null,
         sh_v, sh_null,
         sw_v, sw_null,
@@ -13149,8 +13017,8 @@ upsample_nearest1d_vec :: proc(
     t.atg_upsample_nearest1d_vec(
         &out, 
         input, 
-        raw_data(output_size), c.int(len(output_size)), 
-        raw_data(scale_factors), c.int(len(scale_factors)),
+        raw_data(output_size), i32(len(output_size)), 
+        raw_data(scale_factors), i32(len(scale_factors)),
     )
     return track(out)
 }
@@ -13164,8 +13032,8 @@ upsample_nearest2d_vec :: proc(
     t.atg_upsample_nearest2d_vec(
         &out, 
         input, 
-        raw_data(output_size), c.int(len(output_size)), 
-        raw_data(scale_factors), c.int(len(scale_factors)),
+        raw_data(output_size), i32(len(output_size)), 
+        raw_data(scale_factors), i32(len(scale_factors)),
     )
     return track(out)
 }
@@ -13179,8 +13047,8 @@ upsample_nearest3d_vec :: proc(
     t.atg_upsample_nearest3d_vec(
         &out, 
         input, 
-        raw_data(output_size), c.int(len(output_size)), 
-        raw_data(scale_factors), c.int(len(scale_factors)),
+        raw_data(output_size), i32(len(output_size)), 
+        raw_data(scale_factors), i32(len(scale_factors)),
     )
     return track(out)
 }
@@ -13195,9 +13063,9 @@ upsample_trilinear3d_vec :: proc(
     t.atg_upsample_trilinear3d_vec(
         &out, 
         input, 
-        raw_data(output_size), c.int(len(output_size)), 
-        c.int(1) if align_corners else c.int(0),
-        raw_data(scale_factors), c.int(len(scale_factors)),
+        raw_data(output_size), i32(len(output_size)), 
+        i32(1) if align_corners else i32(0),
+        raw_data(scale_factors), i32(len(scale_factors)),
     )
     return track(out)
 }
@@ -13210,14 +13078,14 @@ value_selecting_reduction_backward :: proc(
     keepdim: bool = false
 ) -> Tensor {
     out: Tensor
-    keep_int := c.int(1) if keepdim else c.int(0)
+    keep_int := i32(1) if keepdim else i32(0)
     t.atg_value_selecting_reduction_backward(
         &out, 
         grad, 
         dim, 
         indices, 
         raw_data(sizes), 
-        c.int(len(sizes)), 
+        i32(len(sizes)), 
         keep_int,
     )
     return track(out)
@@ -13238,7 +13106,7 @@ values_copy :: proc(self: Tensor) -> Tensor {
 // Returns the Vandermonde matrix
 vander :: proc(x: Tensor, n: int = 0, increasing: bool = false) -> Tensor {
     out: Tensor
-    inc_int := c.int(1) if increasing else c.int(0)
+    inc_int := i32(1) if increasing else i32(0)
     
     // Logic: if N is 0 (or unspecified), we likely pass nullptr to n_null/n_ptr
     // to let Torch decide the default (usually defaults to size of x).
@@ -13261,23 +13129,23 @@ var_correction :: proc{var_correction_all, var_correction_dim}
 
 var_all :: proc(self: Tensor, unbiased: bool = true) -> Tensor {
     out: Tensor
-    unb_int := c.int(1) if unbiased else c.int(0)
+    unb_int := i32(1) if unbiased else i32(0)
     t.atg_var(&out, self, unb_int)
     return track(out)
 }
 
 var_dim :: proc(self: Tensor, dim: []i64, unbiased: bool = true, keepdim: bool = false) -> Tensor {
     out: Tensor
-    unb_int := c.int(1) if unbiased else c.int(0)
-    keep_int := c.int(1) if keepdim else c.int(0)
-    t.atg_var_dim(&out, self, raw_data(dim), c.int(len(dim)), unb_int, keep_int)
+    unb_int := i32(1) if unbiased else i32(0)
+    keep_int := i32(1) if keepdim else i32(0)
+    t.atg_var_dim(&out, self, raw_data(dim), i32(len(dim)), unb_int, keep_int)
     return track(out)
 }
 
 var_correction_all :: proc(self: Tensor, correction: Scalar, keepdim: bool = false) -> Tensor {
     out: Tensor
-    keep_int := c.int(1) if keepdim else c.int(0)
-    // Note: atg_var_correction signature provided takes dim_data. 
+    keep_int := i32(1) if keepdim else i32(0)
+    // NOTE: atg_var_correction signature provided takes dim_data. 
     // If this is the "all" version, we pass empty dims or null? 
     // Usually there is a specific 'atg_var_correction' without dims, but the list only had one.
     // We will assume empty slice means "all".
@@ -13288,8 +13156,8 @@ var_correction_all :: proc(self: Tensor, correction: Scalar, keepdim: bool = fal
 
 var_correction_dim :: proc(self: Tensor, dim: []i64, correction: Scalar, keepdim: bool = false) -> Tensor {
     out: Tensor
-    keep_int := c.int(1) if keepdim else c.int(0)
-    t.atg_var_correction(&out, self, raw_data(dim), c.int(len(dim)), correction, keep_int)
+    keep_int := i32(1) if keepdim else i32(0)
+    t.atg_var_correction(&out, self, raw_data(dim), i32(len(dim)), correction, keep_int)
     return track(out)
 }
 
@@ -13298,23 +13166,23 @@ var_mean :: proc{var_mean_all, var_mean_dim}
 
 var_mean_all :: proc(self: Tensor, unbiased: bool = true) -> Tensor {
     out: Tensor
-    unb_int := c.int(1) if unbiased else c.int(0)
+    unb_int := i32(1) if unbiased else i32(0)
     t.atg_var_mean(&out, self, unb_int)
     return track(out)
 }
 
 var_mean_dim :: proc(self: Tensor, dim: []i64, unbiased: bool = true, keepdim: bool = false) -> Tensor {
     out: Tensor
-    unb_int := c.int(1) if unbiased else c.int(0)
-    keep_int := c.int(1) if keepdim else c.int(0)
-    t.atg_var_mean_dim(&out, self, raw_data(dim), c.int(len(dim)), unb_int, keep_int)
+    unb_int := i32(1) if unbiased else i32(0)
+    keep_int := i32(1) if keepdim else i32(0)
+    t.atg_var_mean_dim(&out, self, raw_data(dim), i32(len(dim)), unb_int, keep_int)
     return track(out)
 }
 
 var_mean_correction :: proc(self: Tensor, dim: []i64, correction: Scalar, keepdim: bool = false) -> Tensor {
     out: Tensor
-    keep_int := c.int(1) if keepdim else c.int(0)
-    t.atg_var_mean_correction(&out, self, raw_data(dim), c.int(len(dim)), correction, keep_int)
+    keep_int := i32(1) if keepdim else i32(0)
+    t.atg_var_mean_correction(&out, self, raw_data(dim), i32(len(dim)), correction, keep_int)
     return track(out)
 }
 
@@ -13323,13 +13191,13 @@ view_copy :: proc{view_copy_size, view_copy_dtype}
 
 view_size :: proc(self: Tensor, size: []i64) -> Tensor {
     out: Tensor
-    t.atg_view(&out, self, raw_data(size), c.int(len(size)))
+    t.atg_view(&out, self, raw_data(size), i32(len(size)))
     return track(out)
 }
 
 view_dtype :: proc(self: Tensor, dtype: ScalarType) -> Tensor {
     out: Tensor
-    t.atg_view_dtype(&out, self, c.int(dtype))
+    t.atg_view_dtype(&out, self, i32(dtype))
     return track(out)
 }
 
@@ -13365,20 +13233,20 @@ view_as_real_copy :: proc(self: Tensor) -> Tensor {
 
 view_copy_size :: proc(self: Tensor, size: []i64) -> Tensor {
     out: Tensor
-    t.atg_view_copy(&out, self, raw_data(size), c.int(len(size)))
+    t.atg_view_copy(&out, self, raw_data(size), i32(len(size)))
     return track(out)
 }
 
 view_copy_dtype :: proc(self: Tensor, dtype: ScalarType) -> Tensor {
     out: Tensor
-    t.atg_view_copy_dtype(&out, self, c.int(dtype))
+    t.atg_view_copy_dtype(&out, self, i32(dtype))
     return track(out)
 }
 
 vstack :: proc(tensors: []Tensor) -> Tensor {
     out: Tensor
     // Safety check: tensors slice must not be empty ideally, or torch might throw
-    t.atg_vstack(&out, raw_data(tensors), c.int(len(tensors)))
+    t.atg_vstack(&out, raw_data(tensors), i32(len(tensors)))
     return track(out)
 }
 
@@ -13478,8 +13346,16 @@ zeros :: proc(size: []i64, dtype: ScalarType = .Float, device: i32 = -1) -> Tens
     out: Tensor
     // Mapping options_kind (dtype) and options_device. 
     // Assuming standard mapping: kind=dtype int, device=int (-1 for CPU/Default)
-    t.atg_zeros(&out, raw_data(size), c.int(len(size)), c.int(dtype), c.int(device))
+    t.atg_zeros(&out, raw_data(size), i32(len(size)), i32(dtype), i32(device))
     return track(out)
+}
+
+zero_grad :: proc(self: Tensor) {
+    // Manually zeroes the gradient of a parameter
+    g := grad(self)
+    if defined(g) != 0 {
+        zero(g)
+    }
 }
 
 zeros_like :: proc(self: Tensor) -> Tensor {

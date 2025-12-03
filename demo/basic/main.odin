@@ -1,7 +1,7 @@
 package main
 
 import "core:fmt"
-import "../"
+import "../../"
 
 main :: proc() {
     fmt.println("Lib Torch via Odin")

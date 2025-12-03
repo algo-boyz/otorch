@@ -3,7 +3,7 @@
 
 extern "C" {
     // Dummy implementations for Rust Stream callbacks
-    // We don't need these because we aren't using Rust's std::io
+    // We don't need these because we aren't using Rust
 
     void tch_write_stream_destructor(void* ptr) {}
     void tch_write_stream_write(void* ptr, const void* data, size_t len) {}

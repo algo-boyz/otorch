@@ -14,7 +14,7 @@ LoadCallback :: proc "c" (data: rawptr, name: cstring, t: Tensor)
 
 when ODIN_OS == .Windows {
     #panic("Windows is not supported yet")
-    // TODO: Contributions welcome!
+    // TODO: Contribution welcome!
     // foreign import lib "torch_wrapper.dll"
 } else when ODIN_OS == .Darwin {
     foreign import lib "torch_wrapper.dylib"
@@ -24,10 +24,10 @@ when ODIN_OS == .Windows {
 
 foreign lib {
 
-    // Error Handling ---
+    // Error Handling
     get_and_reset_last_err :: proc() -> cstring ---
 
-    // Tensor Creation & Manipulation ---
+    // Tensor Creation & Manipulation
     at_manual_seed        :: proc(seed: i64) ---
     at_new_tensor         :: proc() -> Tensor ---
     at_tensor_of_blob     :: proc(data: rawptr, dims: [^]i64, ndims: c.size_t, strides: [^]i64, nstrides: c.size_t, type: c.int, device: c.int) -> Tensor ---
@@ -35,7 +35,7 @@ foreign lib {
     at_copy_data          :: proc(t: Tensor, vs: rawptr, numel: c.size_t, element_size_in_bytes: c.size_t) ---
     at_shallow_clone      :: proc(t: Tensor) -> Tensor ---
 
-    // Tensor Properties & Access ---
+    // Tensor Properties & Accessors
     at_data_ptr           :: proc(t: Tensor) -> rawptr ---
     at_defined            :: proc(t: Tensor) -> c.int ---
     at_is_mkldnn          :: proc(t: Tensor) -> c.int ---
@@ -47,7 +47,7 @@ foreign lib {
     at_stride             :: proc(t: Tensor, strides: [^]i64) ---
     at_scalar_type        :: proc(t: Tensor) -> c.int ---
 
-    // AMP (Automatic Mixed Precision) ---
+    // AMP Automatic Mixed Precision
     at__amp_non_finite_check_and_unscale :: proc(t: Tensor, found_inf: Tensor, inv_scale: Tensor) ---
     at_autocast_clear_cache              :: proc() ---
     at_autocast_decrement_nesting        :: proc() -> c.int ---
@@ -55,13 +55,13 @@ foreign lib {
     at_autocast_is_enabled               :: proc() -> bool ---
     at_autocast_set_enabled              :: proc(b: bool) -> bool ---
 
-    // Autograd ---
+    // Autograd
     at_backward           :: proc(t: Tensor, keep_graph: c.int, create_graph: c.int) ---
     at_requires_grad      :: proc(t: Tensor) -> c.int ---
     at_grad_set_enabled   :: proc(enabled: c.int) -> c.int ---
     at_run_backward       :: proc(tensors: [^]Tensor, ntensors: c.int, inputs: [^]Tensor, ninputs: c.int, outputs: [^]Tensor, keep_graph: c.int, create_graph: c.int) ---
 
-    // Operations & Indexing ---
+    // Ops & Indexing
     at_get                :: proc(t: Tensor, index: c.int) -> Tensor ---
     at_fill_double        :: proc(t: Tensor, v: f64) ---
     at_fill_int64         :: proc(t: Tensor, v: i64) ---
@@ -73,7 +73,7 @@ foreign lib {
     
     at_copy_              :: proc(dst: Tensor, src: Tensor) ---
 
-    // I/O & Serialization ---
+    // I/O / Serialization
     at_print              :: proc(t: Tensor) ---
     at_to_string          :: proc(t: Tensor, line_size: c.int) -> cstring ---
     at_save               :: proc(t: Tensor, filename: cstring) ---
@@ -81,26 +81,26 @@ foreign lib {
     at_load               :: proc(filename: cstring) -> Tensor ---
     at_load_from_stream   :: proc(stream_ptr: rawptr) -> Tensor ---
     
-    // Image Ops (libtorch specific) ---
+    // Image Ops
     at_load_image         :: proc(filename: cstring) -> Tensor ---
     at_load_image_from_memory :: proc(img_data: [^]u8, img_size: c.size_t) -> Tensor ---
     at_save_image         :: proc(t: Tensor, filename: cstring) -> c.int ---
     at_resize_image       :: proc(t: Tensor, w: c.int, h: c.int) -> Tensor ---
 
-    // Multi-Tensor I/O ---
+    // Multi-Tensor I/O
     at_save_multi           :: proc(tensors: [^]Tensor, names: [^]cstring, ntensors: c.int, filename: cstring) ---
     at_save_multi_to_stream :: proc(tensors: [^]Tensor, names: [^]cstring, ntensors: c.int, stream_ptr: rawptr) ---
     at_load_multi           :: proc(tensors: [^]Tensor, names: [^]cstring, ntensors: c.int, filename: cstring) ---
     at_load_multi_          :: proc(tensors: [^]Tensor, names: [^]cstring, ntensors: c.int, filename: cstring) ---
 
-    // Callback-based Loading ---
+    // Callback based loading
     at_loadz_callback             :: proc(filename: cstring, data: rawptr, f: LoadCallback) ---
     at_loadz_callback_with_device :: proc(filename: cstring, data: rawptr, f: LoadCallback, device_id: c.int) ---
     at_load_callback              :: proc(filename: cstring, data: rawptr, f: LoadCallback) ---
     at_load_callback_with_device  :: proc(filename: cstring, data: rawptr, f: LoadCallback, device_id: c.int) ---
     at_load_from_stream_callback  :: proc(stream_ptr: rawptr, data: rawptr, f: LoadCallback, enable_device_id: bool, device_id: c.int) ---
 
-    // Threading & Config ---
+    // Threading
     at_get_num_interop_threads :: proc() -> c.int ---
     at_get_num_threads         :: proc() -> c.int ---
     at_set_num_interop_threads :: proc(n_threads: c.int) ---
@@ -108,7 +108,7 @@ foreign lib {
     at_set_qengine             :: proc(qengine: c.int) ---
     at_free                    :: proc(t: Tensor) ---
 
-    // Optimizers ---
+    // Optimizers
     ato_adam            :: proc(lr, beta1, beta2, weight_decay, eps: f64, amsgrad: bool) -> Optimizer ---
     ato_adamw           :: proc(lr, beta1, beta2, weight_decay, eps: f64, amsgrad: bool) -> Optimizer ---
     ato_rms_prop        :: proc(lr, alpha, eps, weight_decay, momentum: f64, centered: c.int) -> Optimizer ---
@@ -125,7 +125,7 @@ foreign lib {
     ato_step                    :: proc(opt: Optimizer) ---
     ato_free                    :: proc(opt: Optimizer) ---
 
-    // Scalars ---
+    // Scalars
     ats_int       :: proc(v: i64) -> Scalar ---
     ats_float     :: proc(v: f64) -> Scalar ---
     ats_to_int    :: proc(s: Scalar) -> i64 ---
@@ -133,7 +133,7 @@ foreign lib {
     ats_to_string :: proc(s: Scalar) -> cstring ---
     ats_free      :: proc(s: Scalar) ---
 
-    // Context / Hardware Support ---
+    // Context / Hardware Support
     at_context_has_openmp    :: proc() -> bool ---
     at_context_has_mkl       :: proc() -> bool ---
     at_context_has_lapack    :: proc() -> bool ---
@@ -151,7 +151,7 @@ foreign lib {
     at_context_has_lazy      :: proc() -> bool ---
     at_context_has_mps       :: proc() -> bool ---
 
-    // CUDA Specifics ---
+    // CUDA
     atc_cuda_device_count      :: proc() -> c.int ---
     atc_cuda_is_available      :: proc() -> c.int ---
     atc_cudnn_is_available     :: proc() -> c.int ---
@@ -162,7 +162,7 @@ foreign lib {
     atc_set_user_enabled_cudnn :: proc(b: c.int) ---
     atc_set_benchmark_cudnn    :: proc(b: c.int) ---
 
-    // Modules (TorchScript) ---
+    // Modules / TorchScript
     atm_load                   :: proc(filename: cstring) -> Module ---
     atm_load_on_device         :: proc(filename: cstring, device: c.int) -> Module ---
     atm_load_str               :: proc(data: cstring, sz: c.size_t) -> Module ---
@@ -183,11 +183,11 @@ foreign lib {
     atm_fuser_cuda_is_enabled  :: proc() -> bool ---
     atm_named_parameters       :: proc(m: Module, data: rawptr, f: LoadCallback) ---
 
-    // Tracing ---
+    // Tracing
     atm_create_for_tracing     :: proc(modl_name: cstring, inputs: [^]Tensor, ninputs: c.int) -> Module ---
     atm_end_tracing            :: proc(m: Module, fn_name: cstring, outputs: [^]Tensor, noutputs: c.int) ---
 
-    // IValues (Intermediate Values) ---
+    // IValues Intermediate Values
     ati_none           :: proc() -> IValue ---
     ati_tensor         :: proc(t: Tensor) -> IValue ---
     ati_int            :: proc(v: i64) -> IValue ---
@@ -229,18 +229,13 @@ foreign lib {
     ati_clone          :: proc(iv: IValue) -> IValue ---
     ati_free           :: proc(iv: IValue) ---
 
-    // Graph Executor ---
+    // Graph Executor
     at_set_graph_executor_optimize :: proc(optimize: bool) ---
 }
 
 check_error :: proc() {
     err := get_and_reset_last_err()
     if err != nil {
-        // Log or panic
-        // Note: 'err' is a cstring that was strdup'ed in C++, 
-        // depending on your wrapper implementation you might need to free it 
-        // or the wrapper handles the buffer.
-        // Assuming the wrapper gives us ownership or a buffer we read immediately:
         panic(string(err))
     }
 }
