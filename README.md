@@ -1,8 +1,11 @@
+# oTorch
+
+Odin bindings for the C++ api of PyTorch. The goal is to provide a thin wrapper around the C++ PyTorch api (a.k.a. libtorch). Staying as close as possible to the original.
 
 **Downloads required:**
 
 1.  **LibTorch (C++):** Download the **cxx11 ABI** version (Linux) or standard version (Windows) from [pytorch.org](https://pytorch.org/get-started/locally/). Unzip it to `libtorch` in the root of this project.
-2.  **tch-rs C api wrapper:** Download ffi files from [tch-rs](https://www.google.com/search?q=https://github.com/LaurentMazare/tch-rs/tree/main/torch-sys/libtch) and put them in `ffi/`.
+2.  **tch-rs C api wrapper:** Download ffi files from [tch-rs](https://github.com/LaurentMazare/tch-rs) and put them in `ffi/`.
 
 
 ### Compile C api wrapper 
@@ -59,3 +62,7 @@ Tensor created successfully!
 
 Done
 ```
+
+# TODO: port some more examples
+
+https://github.com/pytorch/examples
