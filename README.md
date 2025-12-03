@@ -4,11 +4,15 @@ Odin bindings for the C++ api of PyTorch. The goal is to provide a thin wrapper 
 
 **Downloads required:**
 
-1.  **LibTorch (C++):** Download the **cxx11 ABI** version (Linux) or standard version (Windows) from [pytorch.org](https://pytorch.org/get-started/locally/). Unzip it to `libtorch` in the root of this project.
-2.  **tch-rs C api wrapper:** Download ffi files from [tch-rs](https://github.com/LaurentMazare/tch-rs) and put them in `ffi/`.
+  **LibTorch (C++):** Download the **cxx11 ABI** version (Linux) or standard version (Windows) from [pytorch.org](https://pytorch.org/get-started/locally/). Unzip it to `libtorch` in the root of this project.
 
 
-### Compile C api wrapper 
+### Compile C api wrapper
+
+Use `odin run etc` to download libtorch C api headers from [tch-rs](https://github.com/LaurentMazare/tch-rs) to `ffi/` and
+automagically compile the shared lib to `atg/`
+
+Alternatively, you can also run the command to compile libtorch abi manually:
 
 macos:
 
@@ -20,7 +24,7 @@ clang++ -std=c++17 -dynamiclib \
     -ltorch -ltorch_cpu -lc10 \
     -Wno-deprecated-declarations \
     -o atg/torch_wrapper.dylib \
-    ffi/torch_api.cpp ffi/torch_api_gen.cpp ffi/stubs.cpp \
+    ffi/torch_api.h ffi/torch_api_gen.h ffi/stubs.cpp \
     -Wl,-rpath,$(pwd)/libtorch/lib
 ```
 
@@ -34,8 +38,14 @@ clang++ -std=c++17 -shared -fPIC \
     -ltorch -ltorch_cpu -lc10 \
     -Wno-deprecated-declarations \
     -o atg/torch_wrapper.so \
-    ffi/torch_api.cpp ffi/torch_api_gen.cpp ffi/stubs.cpp \
+    ffi/torch_api.h ffi/torch_api_gen.h ffi/stubs.cpp \
     -Wl,-rpath,'$ORIGIN/libtorch/lib'
+```
+
+windows:
+```
+TODO should not be all to hard just don't have windows personally. 
+Contribution welcome!
 ```
 
 ### 3\. How to Use

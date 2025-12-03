@@ -2,6 +2,7 @@
 **/.vscode/
 **/build/
 **/libtorch/
+**.h
 **.so
 **.lib
 **.dll

@@ -5,7 +5,7 @@ import "core:os"
 import "core:strings"
 
 // Configuration
-INPUT_FILE :: "torch_api_gen.h"
+INPUT_FILE :: "torch_api_generated.h"
 
 main :: proc() {
     // 1. Read the header file
