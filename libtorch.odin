@@ -13,7 +13,7 @@ Module      :: t.Module
 IValue      :: t.IValue
 
 DEFAULT_DTYPE :: ScalarType.Float
-DEFAULT_DEVICE :: 0
+DEFAULT_DEVICE :: DeviceType.CPU
 
 ScalarType :: enum i32 {
     Byte   = 0,   // uint8
@@ -30,6 +30,30 @@ Reduction :: enum i64 {
     None = 0,
     Mean = 1,
     Sum  = 2,
+}
+
+DeviceType :: enum i32 {
+    CPU  = 0,
+    CUDA = 1,
+    MKLDNN = 2, // Reserved for explicit MKLDNN
+    OPENGL = 3,
+    OPENCL = 4,
+    IDEEP = 5,
+    HIP = 6,
+    FPGA = 7,
+    MAIA = 8,
+    XLA = 9,
+    Vulkan = 10,
+    Metal = 11,
+    XPU = 12,
+    MPS = 13,
+    Meta = 14,
+    HPU = 15,
+    VE = 16,
+    Lazy = 17,
+    IPU = 18,
+    MTIA = 19,
+    PrivateUse1 = 20,
 }
 
 // POOL MECHANICS
@@ -196,11 +220,7 @@ free_tensor :: proc(self: Tensor) {
     }
 }
 
-fill_double :: proc(self: Tensor, value: f64) {
-    t.at_fill_double(self, value)
-}
-
-add :: proc(self: Tensor, other: Tensor) -> Tensor {
+add :: proc(self, other: Tensor) -> Tensor {
     out: Tensor
     t.atg_add(&out, self, t.Tensor(other))
     return track(out)
@@ -280,33 +300,6 @@ tensor_to_slice :: proc(self: Tensor, $T: typeid, allocator := context.allocator
     
     return res
 }
-
-// tensor_to_slice :: proc(self: Tensor, allocator := context.allocator) -> []f32 {
-//     // Copies data from CPU tensor to Odin slice
-//     // Note: Assumes Float32 tensor.
-//     n := numel(self)
-//     // Ensure contiguous memory for copying
-//     contig := contiguous(self) 
-    
-//     // TODO: verify type/device
-//     data_ptr := data_ptr(contig)
-    
-//     res := make([]f32, n, allocator)
-//     mem_copy := raw_data(res)
-    
-//     // std C memcpy or simple loop if binding available. 
-//     // Assuming we can cast rawptr for this example:
-//     p := (^f32)(data_ptr)
-//     for i in 0..<n {
-//         res[i] = p[i]
-//     }
-    
-//     // We don't track 'contig' because we are about to lose scope inside this func, 
-//     // but better to manually free it to be safe if pool isn't active.
-//     free_tensor(contig)
-    
-//     return res
-// }
 
 numel :: proc(self: Tensor) -> int {
     ndim := dim(self)
@@ -585,10 +578,6 @@ run_backward :: proc(
 // Returns a new tracked tensor
 get :: proc(self: Tensor, index: int) -> Tensor {
     return track(t.at_get(self, i32(index)))
-}
-
-fill_int64 :: proc(self: Tensor, value: i64) {
-    t.at_fill_int64(self, value)
 }
 
 double_value_at :: proc(self: Tensor, indices: []i64) -> f64 {
@@ -1212,7 +1201,7 @@ bitwise_and_ :: proc{
 }
 
 @(private)
-bitwise_and_tensor :: proc(self: Tensor, other: Tensor) -> Tensor {
+bitwise_and_tensor :: proc(self, other: Tensor) -> Tensor {
     out: Tensor
     t.atg_bitwise_and_tensor(&out, self, other)
     return track(out)
@@ -1233,7 +1222,7 @@ bitwise_and_scalar_tensor :: proc(self: Scalar, other: Tensor) -> Tensor {
 }
 
 @(private)
-bitwise_and_tensor_ :: proc(self: Tensor, other: Tensor) -> Tensor {
+bitwise_and_tensor_ :: proc(self, other: Tensor) -> Tensor {
     out: Tensor
     t.atg_bitwise_and_tensor_(&out, self, other)
     return self
@@ -1274,7 +1263,7 @@ bitwise_or :: proc{
 }
 
 @(private)
-bitwise_or_tensor :: proc(self: Tensor, other: Tensor) -> Tensor {
+bitwise_or_tensor :: proc(self, other: Tensor) -> Tensor {
     out: Tensor
     t.atg_bitwise_or_tensor(&out, self, other)
     return track(out)
@@ -1307,7 +1296,7 @@ bitwise_xor_ :: proc{
 }
 
 @(private)
-bitwise_xor_tensor :: proc(self: Tensor, other: Tensor) -> Tensor {
+bitwise_xor_tensor :: proc(self, other: Tensor) -> Tensor {
     out: Tensor
     t.atg_bitwise_xor_tensor(&out, self, other)
     return track(out)
@@ -1328,7 +1317,7 @@ bitwise_xor_scalar_tensor :: proc(self: Scalar, other: Tensor) -> Tensor {
 }
 
 @(private)
-bitwise_xor_tensor_ :: proc(self: Tensor, other: Tensor) -> Tensor {
+bitwise_xor_tensor_ :: proc(self, other: Tensor) -> Tensor {
     out: Tensor
     t.atg_bitwise_xor_tensor_(&out, self, other)
     return self
@@ -1354,7 +1343,7 @@ bitwise_left_shift_ :: proc{
 }
 
 @(private)
-bitwise_left_shift_tensor :: proc(self: Tensor, other: Tensor) -> Tensor {
+bitwise_left_shift_tensor :: proc(self, other: Tensor) -> Tensor {
     out: Tensor
     t.atg_bitwise_left_shift(&out, self, other)
     return track(out)
@@ -1375,7 +1364,7 @@ bitwise_left_shift_scalar_tensor :: proc(self: Scalar, other: Tensor) -> Tensor 
 }
 
 @(private)
-bitwise_left_shift_tensor_ :: proc(self: Tensor, other: Tensor) -> Tensor {
+bitwise_left_shift_tensor_ :: proc(self, other: Tensor) -> Tensor {
     out: Tensor
     t.atg_bitwise_left_shift_(&out, self, other)
     return self
@@ -1401,7 +1390,7 @@ bitwise_right_shift_ :: proc{
 }
 
 @(private)
-bitwise_right_shift_tensor :: proc(self: Tensor, other: Tensor) -> Tensor {
+bitwise_right_shift_tensor :: proc(self, other: Tensor) -> Tensor {
     out: Tensor
     t.atg_bitwise_right_shift(&out, self, other)
     return track(out)
@@ -1422,7 +1411,7 @@ bitwise_right_shift_scalar_tensor :: proc(self: Scalar, other: Tensor) -> Tensor
 }
 
 @(private)
-bitwise_right_shift_tensor_ :: proc(self: Tensor, other: Tensor) -> Tensor {
+bitwise_right_shift_tensor_ :: proc(self, other: Tensor) -> Tensor {
     out: Tensor
     t.atg_bitwise_right_shift_(&out, self, other)
     return self
@@ -1668,7 +1657,7 @@ assert_tensor_metadata :: proc(
     size: []i64, 
     stride: []i64, 
     dtype: ScalarType,
-    device: i32, // TODO Map to c10::DeviceType
+    device: DeviceType, // TODO Map to c10::DeviceType
     layout: rawptr = nil,
 ) {
     t.atg__assert_tensor_metadata(
@@ -2336,10 +2325,9 @@ mkldnn_reshape :: proc(self: Tensor, shape: []i64) -> Tensor {
     return track(out)
 }
 
-make_dep_token :: proc(device_idx: i32 = -1) -> Tensor {
+make_dep_token :: proc(device: DeviceType) -> Tensor {
     out: Tensor
-    // TODO: kind=0 (CPU) is often default for tokens, or inferred
-    t.atg__make_dep_token(&out, 0, i32(device_idx)) 
+    t.atg__make_dep_token(&out, 0, i32(device)) 
     return track(out)
 }
 
@@ -2698,25 +2686,25 @@ affine_grid_generator :: proc(theta: Tensor, size: []i64, align_corners: bool) -
     return track(out)
 }
 
-arange_end :: proc(end: Scalar, dtype: i32, device: i32) -> Tensor {
+arange_end :: proc(end: Scalar, dtype: i32, device: DeviceType) -> Tensor {
     out: Tensor
     t.atg_arange(&out, end, i32(dtype), i32(device))
     return track(out)
 }
 
-arange_start :: proc(start, end: Scalar, dtype: i32, device: i32) -> Tensor {
+arange_start :: proc(start, end: Scalar, dtype: i32, device: DeviceType) -> Tensor {
     out: Tensor
     t.atg_arange_start(&out, start, end, i32(dtype), i32(device))
     return track(out)
 }
 
-arange_step :: proc(start, end, step: Scalar, dtype: i32, device: i32) -> Tensor {
+arange_step :: proc(start, end, step: Scalar, dtype: i32, device: DeviceType) -> Tensor {
     out: Tensor
     t.atg_arange_start_step(&out, start, end, step, i32(dtype), i32(device))
     return track(out)
 }
 
-bartlett_window :: proc(window_length: i64, periodic: bool = true, dtype: i32, device: i32) -> Tensor {
+bartlett_window :: proc(window_length: i64, periodic: bool = true, dtype: i32, device: DeviceType) -> Tensor {
     out: Tensor
     p_int := i32(1) if periodic else i32(0)
     t.atg_bartlett_window_periodic(&out, window_length, p_int, i32(dtype), i32(device))
@@ -2968,7 +2956,7 @@ bilinear :: proc(input1, input2, weight, bias: Tensor) -> Tensor {
     return track(out)
 }
 
-blackman_window :: proc(window_length: i64, periodic: bool = true, dtype: i32 = 6 /*Float*/, device: i32 = 0 /*CPU*/) -> Tensor {
+blackman_window :: proc(window_length: i64, periodic: bool = true, dtype: i32 = 6 /*Float*/, device: DeviceType = .CPU) -> Tensor {
     out: Tensor
     if periodic {
         t.atg_blackman_window_periodic(&out, window_length, 1, i32(dtype), i32(device))
@@ -3527,28 +3515,28 @@ ctc_loss :: proc(
 // FACTORY METHODS
 empty :: proc(
     size: []i64, 
-    options_kind: i32 = i32(ScalarType.Float), 
-    options_device: i32 = 0, // 0 usually CPU
+    kind: ScalarType = .Float, 
+    device: DeviceType = .CPU
 ) -> Tensor {
     out: Tensor
     t.atg_empty(
         &out, 
         raw_data(size), i32(len(size)), 
-        i32(options_kind), 
-        i32(options_device),
+        i32(kind), 
+        i32(device),
     )
     return track(out)
 }
 
-eye :: proc(n: i64, options_kind: i32 = i32(ScalarType.Float), options_device: i32 = 0) -> Tensor {
+eye :: proc(n: i64, kind: ScalarType = .Float, device: DeviceType = .CPU) -> Tensor {
     out: Tensor
-    t.atg_eye(&out, n, i32(options_kind), i32(options_device))
+    t.atg_eye(&out, n, i32(kind), i32(device))
     return track(out)
 }
 
-eye_m :: proc(n, m: i64, options_kind: i32 = i32(ScalarType.Float), options_device: i32 = 0) -> Tensor {
+eye_m :: proc(n, m: i64, kind: ScalarType = .Float, device: DeviceType = .CPU) -> Tensor {
     out: Tensor
-    t.atg_eye_m(&out, n, m, i32(options_kind), i32(options_device))
+    t.atg_eye_m(&out, n, m, i32(kind), i32(device))
     return track(out)
 }
 
@@ -3842,15 +3830,15 @@ fake_quantize_per_channel_affine :: proc(
 empty_strided :: proc(
     size: []i64, 
     stride: []i64, 
-    options_kind: i32 = i32(ScalarType.Float), 
-    options_device: i32 = 0
+    kind: ScalarType = .Float, 
+    device: DeviceType = .CPU
 ) -> Tensor {
     out: Tensor
     t.atg_empty_strided(
         &out, 
         raw_data(size), i32(len(size)), 
         raw_data(stride), i32(len(stride)), 
-        i32(options_kind), i32(options_device),
+        i32(kind), i32(device),
     )
     return track(out)
 }
@@ -3858,15 +3846,15 @@ empty_strided :: proc(
 empty_permuted :: proc(
     size: []i64, 
     physical_layout: []i64, 
-    options_kind: i32 = i32(ScalarType.Float), 
-    options_device: i32 = 0
+    kind: ScalarType = .Float, 
+    device: DeviceType = .CPU
 ) -> Tensor {
     out: Tensor
     t.atg_empty_permuted(
         &out, 
         raw_data(size), i32(len(size)), 
         raw_data(physical_layout), i32(len(physical_layout)), 
-        i32(options_kind), i32(options_device),
+        i32(kind), i32(device),
     )
     return track(out)
 }
@@ -4130,16 +4118,16 @@ tensor_data :: proc(self: Tensor) -> Tensor {
 empty_quantized :: proc(
     size: []i64, 
     qtensor: Tensor, 
-    options_kind: i32 = i32(ScalarType.Float), 
-    options_device: i32 = 0,
+    kind: ScalarType = .Float, 
+    device: DeviceType = .CPU,
 ) -> Tensor {
     out: Tensor
     t.atg_empty_quantized(
         &out, 
         raw_data(size), i32(len(size)), 
         qtensor,
-        i32(options_kind), 
-        i32(options_device),
+        i32(kind), 
+        i32(device),
     )
     return track(out)
 }
@@ -4434,13 +4422,13 @@ ifftshift :: proc(self: Tensor, dim: []i64 = nil) -> Tensor {
     return track(out)
 }
 
-fftfreq :: proc(n: i64, d: f64 = 1.0, dtype: ScalarType = .Float, device: i32 = 0) -> Tensor {
+fftfreq :: proc(n: i64, d: f64 = 1.0, dtype: ScalarType = .Float, device: DeviceType = .CPU) -> Tensor {
     out: Tensor
     t.atg_fft_fftfreq(&out, n, d, i32(dtype), i32(device))
     return track(out)
 }
 
-rfftfreq :: proc(n: i64, d: f64 = 1.0, dtype: ScalarType = .Float, device: i32 = 0) -> Tensor {
+rfftfreq :: proc(n: i64, d: f64 = 1.0, dtype: ScalarType = .Float, device: DeviceType = .CPU) -> Tensor {
     out: Tensor
     t.atg_fft_rfftfreq(&out, n, d, i32(dtype), i32(device))
     return track(out)
@@ -4448,14 +4436,16 @@ rfftfreq :: proc(n: i64, d: f64 = 1.0, dtype: ScalarType = .Float, device: i32 =
 
 // Fill & Fix
 
-fix :: proc(self: Tensor) -> Tensor {
-    out: Tensor
-    t.atg_fix(&out, self)
-    return track(out)
+fill :: proc{fill_scalar, fill_tensor, fill_int64, fill_double}
+fill_ :: proc{fill_scalar_, fill_tensor_}
+
+fill_int64 :: proc(self: Tensor, value: i64) {
+    t.at_fill_int64(self, value)
 }
 
-fill :: proc{fill_scalar, fill_tensor}
-fill_ :: proc{fill_scalar_, fill_tensor_}
+fill_double :: proc(self: Tensor, value: f64) {
+    t.at_fill_double(self, value)
+}
 
 @private
 fill_scalar :: proc(self: Tensor, value: Scalar) -> Tensor {
@@ -4490,6 +4480,12 @@ fill_diagonal_ :: proc(self: Tensor, fill_value: Scalar, wrap: bool = false) -> 
     wrap_int := i32(1) if wrap else i32(0)
     t.atg_fill_diagonal_(&out, self, fill_value, wrap_int)
     return self
+}
+
+fix :: proc(self: Tensor) -> Tensor {
+    out: Tensor
+    t.atg_fix(&out, self)
+    return track(out)
 }
 
 fix_ :: proc(self: Tensor) -> Tensor {
@@ -4598,7 +4594,7 @@ floor_divide :: proc{floor_divide_tensor, floor_divide_scalar}
 floor_divide_ :: proc{floor_divide_tensor_, floor_divide_scalar_}
 
 @private
-floor_divide_tensor :: proc(self: Tensor, other: Tensor) -> Tensor {
+floor_divide_tensor :: proc(self, other: Tensor) -> Tensor {
     out: Tensor
     t.atg_floor_divide(&out, self, other)
     return track(out)
@@ -4612,7 +4608,7 @@ floor_divide_scalar :: proc(self: Tensor, other: Scalar) -> Tensor {
 }
 
 @private
-floor_divide_tensor_ :: proc(self: Tensor, other: Tensor) -> Tensor {
+floor_divide_tensor_ :: proc(self, other: Tensor) -> Tensor {
     out: Tensor
     t.atg_floor_divide_(&out, self, other)
     return self
@@ -4625,13 +4621,13 @@ floor_divide_scalar_ :: proc(self: Tensor, other: Scalar) -> Tensor {
     return self
 }
 
-fmax :: proc(self: Tensor, other: Tensor) -> Tensor {
+fmax :: proc(self, other: Tensor) -> Tensor {
     out: Tensor
     t.atg_fmax(&out, self, other)
     return track(out)
 }
 
-fmin :: proc(self: Tensor, other: Tensor) -> Tensor {
+fmin :: proc(self, other: Tensor) -> Tensor {
     out: Tensor
     t.atg_fmin(&out, self, other)
     return track(out)
@@ -4641,7 +4637,7 @@ fmod :: proc{fmod_tensor, fmod_scalar}
 fmod_ :: proc{fmod_tensor_, fmod_scalar_}
 
 @private
-fmod_tensor :: proc(self: Tensor, other: Tensor) -> Tensor {
+fmod_tensor :: proc(self, other: Tensor) -> Tensor {
     out: Tensor
     t.atg_fmod_tensor(&out, self, other)
     return track(out)
@@ -4655,7 +4651,7 @@ fmod_scalar :: proc(self: Tensor, other: Scalar) -> Tensor {
 }
 
 @private
-fmod_tensor_ :: proc(self: Tensor, other: Tensor) -> Tensor {
+fmod_tensor_ :: proc(self, other: Tensor) -> Tensor {
     out: Tensor
     t.atg_fmod_tensor_(&out, self, other)
     return self
@@ -4846,8 +4842,8 @@ from_file :: proc(
     filename: string, 
     shared: bool = false, 
     size: i64 = 0, 
-    options_kind: i32 = 0, 
-    options_device: i32 = 0
+    kind: ScalarType = .Float, 
+    device: DeviceType = .CPU,
 ) -> Tensor {
     out: Tensor
     c_filename := strings.clone_to_cstring(filename, context.temp_allocator)
@@ -4860,21 +4856,21 @@ from_file :: proc(
         shared_int, 
         size, 
         nil, 
-        i32(options_kind), 
-        i32(options_device),
+        i32(kind), 
+        i32(device),
     )
     return track(out)
 }
 
-full :: proc(size: []i64, fill_value: Scalar, options_kind: i32 = 0, options_device: i32 = 0) -> Tensor {
+full :: proc(size: []i64, fill_value: Scalar, kind: ScalarType = .Float, device: DeviceType = .CPU) -> Tensor {
     out: Tensor
     t.atg_full(
         &out, 
         raw_data(size), 
         i32(len(size)), 
         fill_value, 
-        i32(options_kind), 
-        i32(options_device),
+        i32(kind), 
+        i32(device),
     )
     return track(out)
 }
@@ -4921,14 +4917,14 @@ ge_scalar_ :: proc(self: Tensor, other: Scalar) -> Tensor {
 }
 
 @private
-ge_tensor :: proc(self: Tensor, other: Tensor) -> Tensor {
+ge_tensor :: proc(self, other: Tensor) -> Tensor {
     out: Tensor
     t.atg_ge_tensor(&out, self, other)
     return track(out)
 }
 
 @private
-ge_tensor_ :: proc(self: Tensor, other: Tensor) -> Tensor {
+ge_tensor_ :: proc(self, other: Tensor) -> Tensor {
     out: Tensor
     t.atg_ge_tensor_(&out, self, other)
     return self
@@ -5224,13 +5220,13 @@ hstack :: proc(tensors: []Tensor) -> Tensor {
     return track(out)
 }
 
-hypot :: proc(self: Tensor, other: Tensor) -> Tensor {
+hypot :: proc(self, other: Tensor) -> Tensor {
     out: Tensor
     t.atg_hypot(&out, self, other)
     return track(out)
 }
 
-hypot_ :: proc(self: Tensor, other: Tensor) -> Tensor {
+hypot_ :: proc(self, other: Tensor) -> Tensor {
     out: Tensor
     t.atg_hypot_(&out, self, other)
     return self
@@ -5250,26 +5246,26 @@ i0_ :: proc(self: Tensor) -> Tensor {
 }
 
 // igamma (Regularized lower incomplete gamma function)
-igamma :: proc(self: Tensor, other: Tensor) -> Tensor {
+igamma :: proc(self, other: Tensor) -> Tensor {
     out: Tensor
     t.atg_igamma(&out, self, other)
     return track(out)
 }
 
-igamma_ :: proc(self: Tensor, other: Tensor) -> Tensor {
+igamma_ :: proc(self, other: Tensor) -> Tensor {
     out: Tensor
     t.atg_igamma_(&out, self, other)
     return self
 }
 
 // igammac (Regularized upper incomplete gamma function)
-igammac :: proc(self: Tensor, other: Tensor) -> Tensor {
+igammac :: proc(self, other: Tensor) -> Tensor {
     out: Tensor
     t.atg_igammac(&out, self, other)
     return track(out)
 }
 
-igammac_ :: proc(self: Tensor, other: Tensor) -> Tensor {
+igammac_ :: proc(self, other: Tensor) -> Tensor {
     out: Tensor
     t.atg_igammac_(&out, self, other)
     return self
@@ -5620,7 +5616,7 @@ le_scalar :: proc(self: Tensor, other: Scalar) -> Tensor {
 }
 
 @private
-le_tensor :: proc(self: Tensor, other: Tensor) -> Tensor {
+le_tensor :: proc(self, other: Tensor) -> Tensor {
     out: Tensor
     t.atg_le_tensor(&out, self, other)
     return track(out)
@@ -5634,7 +5630,7 @@ le_scalar_ :: proc(self: Tensor, other: Scalar) -> Tensor {
 }
 
 @private
-le_tensor_ :: proc(self: Tensor, other: Tensor) -> Tensor {
+le_tensor_ :: proc(self, other: Tensor) -> Tensor {
     out: Tensor
     t.atg_le_tensor_(&out, self, other)
     return self
@@ -5686,21 +5682,21 @@ ldexp_ :: proc(self, other: Tensor) -> Tensor {
     return self
 }
 
-kaiser_window_simple :: proc(window_length: i64, device: i32 = -1, dtype: i32 = -1) -> Tensor {
+kaiser_window_simple :: proc(window_length: i64, device: DeviceType = .CPU, dtype: i32 = -1) -> Tensor {
     out: Tensor
-    t.atg_kaiser_window(&out, window_length, dtype, device)
+    t.atg_kaiser_window(&out, window_length, dtype, i32(device))
     return track(out)
 }
 
-kaiser_window_beta :: proc(window_length: i64, periodic: bool, beta: f64, device: i32 = -1, dtype: i32 = -1) -> Tensor {
+kaiser_window_beta :: proc(window_length: i64, periodic: bool, beta: f64, device: DeviceType = .CPU, dtype: i32 = -1) -> Tensor {
     out: Tensor
-    t.atg_kaiser_window_beta(&out, window_length, i32(periodic), beta, dtype, device)
+    t.atg_kaiser_window_beta(&out, window_length, i32(periodic), beta, dtype, i32(device))
     return track(out)
 }
 
-kaiser_window_periodic :: proc(window_length: i64, periodic: bool, device: i32 = -1, dtype: i32 = -1) -> Tensor {
+kaiser_window_periodic :: proc(window_length: i64, periodic: bool, device: DeviceType = .CPU, dtype: i32 = -1) -> Tensor {
     out: Tensor
-    t.atg_kaiser_window_periodic(&out, window_length, i32(periodic), dtype, device)
+    t.atg_kaiser_window_periodic(&out, window_length, i32(periodic), dtype, i32(device))
     return track(out)
 }
 
@@ -5957,7 +5953,7 @@ linalg_norm_str :: proc(self: Tensor, ord: string, dim: []i64 = nil, keepdim: bo
 
 //  Cross / Diagonal
 
-linalg_cross :: proc(self: Tensor, other: Tensor, dim: i64 = -1) -> Tensor {
+linalg_cross :: proc(self, other: Tensor, dim: i64 = -1) -> Tensor {
     out: Tensor
     t.atg_linalg_cross(&out, self, other, dim)
     return track(out)
@@ -6290,7 +6286,7 @@ linspace_scalar_scalar :: proc(
     end: Scalar, 
     steps: i64, 
     dtype: ScalarType = .Float, 
-    device: i32 = 0 // 0 = CPU, 1 = CUDA
+    device: DeviceType = .CPU
 ) -> Tensor {
     out: Tensor
     t.atg_linspace(&out, start, end, steps, i32(dtype), i32(device))
@@ -6303,7 +6299,7 @@ linspace_scalar_tensor :: proc(
     end: Tensor, 
     steps: i64, 
     dtype: ScalarType = .Float, 
-    device: i32 = 0
+    device: DeviceType = .CPU
 ) -> Tensor {
     out: Tensor
     t.atg_linspace_scalar_tensor(&out, start, end, steps, i32(dtype), i32(device))
@@ -6316,7 +6312,7 @@ linspace_tensor_scalar :: proc(
     end: Scalar, 
     steps: i64, 
     dtype: ScalarType = .Float, 
-    device: i32 = 0
+    device: DeviceType = .CPU
 ) -> Tensor {
     out: Tensor
     t.atg_linspace_tensor_scalar(&out, start, end, steps, i32(dtype), i32(device))
@@ -6329,7 +6325,7 @@ linspace_tensor_tensor :: proc(
     end: Tensor, 
     steps: i64, 
     dtype: ScalarType = .Float, 
-    device: i32 = 0
+    device: DeviceType = .CPU
 ) -> Tensor {
     out: Tensor
     t.atg_linspace_tensor_tensor(&out, start, end, steps, i32(dtype), i32(device))
@@ -6420,7 +6416,7 @@ log_softmax :: proc(self: Tensor, dim: i64, dtype: ScalarType) -> Tensor {
 
 // Log Add Exp
 // logarithm of the sum of exponentiations: log(exp(x) + exp(y))
-logaddexp :: proc(self: Tensor, other: Tensor) -> Tensor {
+logaddexp :: proc(self, other: Tensor) -> Tensor {
     out: Tensor
     t.atg_logaddexp(&out, self, other)
     return track(out)
@@ -6428,7 +6424,7 @@ logaddexp :: proc(self: Tensor, other: Tensor) -> Tensor {
 
 // Log Add Exp 2
 // logarithm of the sum of exponentiations in base 2: log2(2^x + 2^y)
-logaddexp2 :: proc(self: Tensor, other: Tensor) -> Tensor {
+logaddexp2 :: proc(self, other: Tensor) -> Tensor {
     out: Tensor
     t.atg_logaddexp2(&out, self, other)
     return track(out)
@@ -6550,28 +6546,28 @@ logspace :: proc{
 }
 
 @private
-logspace_scalar_scalar :: proc(start, end: Scalar, steps: i64, base: f64 = 10.0, dtype: i32 = 0, device: i32 = 0) -> Tensor {
+logspace_scalar_scalar :: proc(start, end: Scalar, steps: i64, base: f64 = 10.0, dtype: i32 = 0, device: DeviceType = .CPU) -> Tensor {
     out: Tensor
     t.atg_logspace(&out, start, end, steps, base, i32(dtype), i32(device))
     return track(out)
 }
 
 @private
-logspace_scalar_tensor :: proc(start: Scalar, end: Tensor, steps: i64, base: f64 = 10.0, dtype: i32 = 0, device: i32 = 0) -> Tensor {
+logspace_scalar_tensor :: proc(start: Scalar, end: Tensor, steps: i64, base: f64 = 10.0, dtype: i32 = 0, device: DeviceType = .CPU) -> Tensor {
     out: Tensor
     t.atg_logspace_scalar_tensor(&out, start, end, steps, base, i32(dtype), i32(device))
     return track(out)
 }
 
 @private
-logspace_tensor_scalar :: proc(start: Tensor, end: Scalar, steps: i64, base: f64 = 10.0, dtype: i32 = 0, device: i32 = 0) -> Tensor {
+logspace_tensor_scalar :: proc(start: Tensor, end: Scalar, steps: i64, base: f64 = 10.0, dtype: i32 = 0, device: DeviceType = .CPU) -> Tensor {
     out: Tensor
     t.atg_logspace_tensor_scalar(&out, start, end, steps, base, i32(dtype), i32(device))
     return track(out)
 }
 
 @private
-logspace_tensor_tensor :: proc(start, end: Tensor, steps: i64, base: f64 = 10.0, dtype: i32 = 0, device: i32 = 0) -> Tensor {
+logspace_tensor_tensor :: proc(start, end: Tensor, steps: i64, base: f64 = 10.0, dtype: i32 = 0, device: DeviceType = .CPU) -> Tensor {
     out: Tensor
     t.atg_logspace_tensor_tensor(&out, start, end, steps, base, i32(dtype), i32(device))
     return track(out)
@@ -6720,7 +6716,7 @@ masked_select_backward :: proc(grad: Tensor, input: Tensor, mask: Tensor) -> Ten
 
 //  MATRIX OPS
 
-matmul :: proc(self: Tensor, other: Tensor) -> Tensor {
+matmul :: proc(self, other: Tensor) -> Tensor {
     out: Tensor
     t.atg_matmul(&out, self, other)
     return track(out)
@@ -6754,7 +6750,7 @@ matrix_power :: proc(self: Tensor, n: i64) -> Tensor {
 //  REDUCTIONS & MAX
 
 // Element-wise max
-maximum :: proc(self: Tensor, other: Tensor) -> Tensor {
+maximum :: proc(self, other: Tensor) -> Tensor {
     out: Tensor
     t.atg_maximum(&out, self, other)
     return track(out)
@@ -6982,7 +6978,7 @@ min_dim :: proc(self: Tensor, dim: i64, keepdim: bool = false) -> (values, indic
 }
 
 // Alias for element-wise minimum
-minimum :: proc(self: Tensor, other: Tensor) -> Tensor {
+minimum :: proc(self, other: Tensor) -> Tensor {
     out: Tensor
     t.atg_minimum(&out, self, other)
     return track(out)
@@ -7997,7 +7993,7 @@ ne_scalar :: proc(self: Tensor, other: Scalar) -> Tensor {
 }
 
 @private
-ne_tensor :: proc(self: Tensor, other: Tensor) -> Tensor {
+ne_tensor :: proc(self, other: Tensor) -> Tensor {
     out: Tensor
     t.atg_ne_tensor(&out, self, other)
     return track(out)
@@ -8011,7 +8007,7 @@ ne_scalar_ :: proc(self: Tensor, other: Scalar) -> Tensor {
 }
 
 @private
-ne_tensor_ :: proc(self: Tensor, other: Tensor) -> Tensor {
+ne_tensor_ :: proc(self, other: Tensor) -> Tensor {
     out: Tensor
     t.atg_ne_tensor_(&out, self, other)
     return self
@@ -8043,13 +8039,13 @@ negative_ :: proc(self: Tensor) -> Tensor {
     return self
 }
 
-nextafter :: proc(self: Tensor, other: Tensor) -> Tensor {
+nextafter :: proc(self, other: Tensor) -> Tensor {
     out: Tensor
     t.atg_nextafter(&out, self, other)
     return track(out)
 }
 
-nextafter_ :: proc(self: Tensor, other: Tensor) -> Tensor {
+nextafter_ :: proc(self, other: Tensor) -> Tensor {
     out: Tensor
     t.atg_nextafter_(&out, self, other)
     return self
@@ -8072,8 +8068,8 @@ nested_to_padded_tensor :: proc(self: Tensor, padding: f64, output_size: []i64) 
 new_empty :: proc(
     self: Tensor, 
     size: []i64, 
-    options_kind: i32 = 0, 
-    options_device: i32 = -1, // -1 implies current or default
+    kind: ScalarType = .Float, 
+    device: DeviceType = .CPU,
 ) -> Tensor {
     out: Tensor
     t.atg_new_empty(
@@ -8081,8 +8077,8 @@ new_empty :: proc(
         self, 
         raw_data(size), 
         i32(len(size)), 
-        i32(options_kind), 
-        i32(options_device),
+        i32(kind), 
+        i32(device),
     )
     return track(out)
 }
@@ -8091,8 +8087,8 @@ new_empty_strided :: proc(
     self: Tensor, 
     size: []i64, 
     stride: []i64, 
-    options_kind: i32 = 0, 
-    options_device: i32 = -1,
+    kind: ScalarType = .Float, 
+    device: DeviceType = .CPU,
 ) -> Tensor {
     out: Tensor
     t.atg_new_empty_strided(
@@ -8102,8 +8098,8 @@ new_empty_strided :: proc(
         i32(len(size)), 
         raw_data(stride), 
         i32(len(stride)), 
-        i32(options_kind), 
-        i32(options_device),
+        i32(kind), 
+        i32(device),
     )
     return track(out)
 }
@@ -8112,8 +8108,8 @@ new_full :: proc(
     self: Tensor, 
     size: []i64, 
     fill_value: Scalar, 
-    options_kind: i32 = 0, 
-    options_device: i32 = -1,
+    kind: ScalarType = .Float, 
+    device: DeviceType = .CPU,
 ) -> Tensor {
     out: Tensor
     t.atg_new_full(
@@ -8122,8 +8118,8 @@ new_full :: proc(
         raw_data(size), 
         i32(len(size)), 
         fill_value, 
-        i32(options_kind), 
-        i32(options_device),
+        i32(kind), 
+        i32(device),
     )
     return track(out)
 }
@@ -8131,8 +8127,8 @@ new_full :: proc(
 new_ones :: proc(
     self: Tensor, 
     size: []i64, 
-    options_kind: i32 = 0, 
-    options_device: i32 = -1,
+    kind: ScalarType = .Float, 
+    device: DeviceType = .CPU,
 ) -> Tensor {
     out: Tensor
     t.atg_new_ones(
@@ -8140,8 +8136,8 @@ new_ones :: proc(
         self, 
         raw_data(size), 
         i32(len(size)), 
-        i32(options_kind), 
-        i32(options_device),
+        i32(kind), 
+        i32(device),
     )
     return track(out)
 }
@@ -8149,8 +8145,8 @@ new_ones :: proc(
 new_zeros :: proc(
     self: Tensor, 
     size: []i64, 
-    options_kind: i32 = 0, 
-    options_device: i32 = -1,
+    kind: ScalarType = .Float, 
+    device: DeviceType = .CPU,
 ) -> Tensor {
     out: Tensor
     t.atg_new_zeros(
@@ -8158,8 +8154,8 @@ new_zeros :: proc(
         self, 
         raw_data(size), 
         i32(len(size)), 
-        i32(options_kind), 
-        i32(options_device),
+        i32(kind), 
+        i32(device),
     )
     return track(out)
 }
@@ -8292,14 +8288,14 @@ not_equal_scalar_ :: proc(self: Tensor, other: Scalar) -> Tensor {
 }
 
 @private
-not_equal_tensor :: proc(self: Tensor, other: Tensor) -> Tensor {
+not_equal_tensor :: proc(self, other: Tensor) -> Tensor {
     out: Tensor
     t.atg_not_equal_tensor(&out, self, other)
     return track(out)
 }
 
 @private
-not_equal_tensor_ :: proc(self: Tensor, other: Tensor) -> Tensor {
+not_equal_tensor_ :: proc(self, other: Tensor) -> Tensor {
     out: Tensor
     t.atg_not_equal_tensor_(&out, self, other)
     return self
@@ -8340,7 +8336,7 @@ one_hot :: proc(self: Tensor, num_classes: i64) -> Tensor {
 
 // ONES
 
-ones :: proc(size: []i64, kind: ScalarType = .Float, device: i32 = 0) -> Tensor {
+ones :: proc(size: []i64, kind: ScalarType = .Float, device: DeviceType = .CPU) -> Tensor {
     out: Tensor
     // NOTE: device mappings depend on c10::DeviceType. 0 is usually CPU.
     t.atg_ones(&out, raw_data(size), i32(len(size)), i32(kind), i32(device))
@@ -8412,9 +8408,9 @@ poisson_nll_loss :: proc(input, target: Tensor, log_input: bool, full: bool, eps
     return track(out)
 }
 
-pin_memory :: proc(self: Tensor, device: i32 = 0) -> Tensor {
+pin_memory :: proc(self: Tensor, device: DeviceType = .CPU) -> Tensor {
     out: Tensor
-    t.atg_pin_memory(&out, self, device)
+    t.atg_pin_memory(&out, self, i32(device))
     return track(out)
 }
 
@@ -8835,7 +8831,7 @@ ravel :: proc(self: Tensor) -> Tensor {
 rand :: proc(
     size: []i64, 
     dtype := DEFAULT_DTYPE, 
-    device: i32 = DEFAULT_DEVICE
+    device: DeviceType = DEFAULT_DEVICE
 ) -> Tensor {
     out: Tensor
     t.atg_rand(
@@ -8858,7 +8854,7 @@ randint :: proc(
     high: i64, 
     size: []i64, 
     dtype := DEFAULT_DTYPE, 
-    device: i32 = DEFAULT_DEVICE
+    device: DeviceType = DEFAULT_DEVICE
 ) -> Tensor {
     out: Tensor
     t.atg_randint(
@@ -8877,7 +8873,7 @@ randint_low :: proc(
     high: i64, 
     size: []i64, 
     dtype := DEFAULT_DTYPE, 
-    device: i32 = DEFAULT_DEVICE
+    device: DeviceType = DEFAULT_DEVICE
 ) -> Tensor {
     out: Tensor
     t.atg_randint_low(
@@ -8913,7 +8909,7 @@ randint_like_tensor :: proc(self: Tensor, high: Tensor) -> Tensor {
 randn :: proc(
     size: []i64, 
     dtype := DEFAULT_DTYPE, 
-    device: i32 = DEFAULT_DEVICE
+    device: DeviceType = DEFAULT_DEVICE
 ) -> Tensor {
     out: Tensor
     t.atg_randn(
@@ -8935,7 +8931,7 @@ randn_like :: proc(self: Tensor) -> Tensor {
 randperm :: proc(
     n: i64, 
     dtype := ScalarType.Long, 
-    device: i32 = DEFAULT_DEVICE
+    device: DeviceType = DEFAULT_DEVICE
 ) -> Tensor {
     out: Tensor
     t.atg_randperm(
@@ -8953,7 +8949,7 @@ range :: proc(
     start: Scalar, 
     end: Scalar, 
     dtype := DEFAULT_DTYPE, 
-    device: i32 = DEFAULT_DEVICE
+    device: DeviceType = DEFAULT_DEVICE
 ) -> Tensor {
     out: Tensor
     t.atg_range(&out, start, end, i32(dtype), i32(device))
@@ -8964,7 +8960,7 @@ range_step :: proc(
     start: Scalar, 
     end: Scalar, 
     dtype := DEFAULT_DTYPE, 
-    device: i32 = DEFAULT_DEVICE
+    device: DeviceType = DEFAULT_DEVICE
 ) -> Tensor {
     out: Tensor
     t.atg_range_step(&out, start, end, i32(dtype), i32(device))
@@ -9118,7 +9114,7 @@ remainder_scalar_tensor :: proc(self: Scalar, other: Tensor) -> Tensor {
 }
 
 @private
-remainder_tensor_tensor :: proc(self: Tensor, other: Tensor) -> Tensor {
+remainder_tensor_tensor :: proc(self, other: Tensor) -> Tensor {
     out: Tensor
     t.atg_remainder_tensor(&out, self, other)
     return track(out)
@@ -9132,7 +9128,7 @@ remainder_tensor_scalar_ :: proc(self: Tensor, other: Scalar) -> Tensor {
 }
 
 @private
-remainder_tensor_tensor_ :: proc(self: Tensor, other: Tensor) -> Tensor {
+remainder_tensor_tensor_ :: proc(self, other: Tensor) -> Tensor {
     out: Tensor
     t.atg_remainder_tensor_(&out, self, other)
     return self
@@ -9274,7 +9270,7 @@ reshape :: proc(self: Tensor, shape: []i64) -> Tensor {
     return track(out)
 }
 
-reshape_as :: proc(self: Tensor, other: Tensor) -> Tensor {
+reshape_as :: proc(self, other: Tensor) -> Tensor {
     out: Tensor
     t.atg_reshape_as(&out, self, other)
     return track(out)
@@ -9615,7 +9611,7 @@ rsqrt_ :: proc(self: Tensor) -> Tensor {
 rsub :: proc{rsub_tensor, rsub_scalar}
 
 @private
-rsub_tensor :: proc(self: Tensor, other: Tensor) -> Tensor {
+rsub_tensor :: proc(self, other: Tensor) -> Tensor {
     out: Tensor
     t.atg_rsub(&out, self, other)
     return track(out)
@@ -9633,11 +9629,11 @@ rsub_scalar :: proc(self: Tensor, other: Scalar) -> Tensor {
 // Create a 0-dim tensor from a scalar
 scalar_tensor :: proc(
     s: Scalar, 
-    options_kind: i32 = 3, // TODO: map kind to enum / default common kind if unknown
-    options_device: i32 = 0
+    kind: ScalarType = .Float,
+    device: DeviceType = .CPU
 ) -> Tensor {
     out: Tensor
-    t.atg_scalar_tensor(&out, s, options_kind, options_device)
+    t.atg_scalar_tensor(&out, s, i32(kind), i32(device))
     return track(out)
 }
 
@@ -10398,8 +10394,8 @@ sparse_bsc_tensor :: proc(
     ccol_indices: Tensor,
     row_indices: Tensor,
     values: Tensor,
-    options_kind: i32 = 0,
-    options_device: i32 = 0,
+    kind: ScalarType = .Float,
+    device: DeviceType = .CPU,
 ) -> Tensor {
     out: Tensor
     t.atg_sparse_bsc_tensor(
@@ -10407,8 +10403,8 @@ sparse_bsc_tensor :: proc(
         ccol_indices,
         row_indices,
         values,
-        i32(options_kind),
-        i32(options_device),
+        i32(kind),
+        i32(device),
     )
     return track(out)
 }
@@ -10418,8 +10414,8 @@ sparse_bsc_tensor_size :: proc(
     row_indices: Tensor,
     values: Tensor,
     size: []i64,
-    options_kind: i32 = 0,
-    options_device: i32 = 0,
+    kind: ScalarType = .Float,
+    device: DeviceType = .CPU,
 ) -> Tensor {
     out: Tensor
     t.atg_sparse_bsc_tensor_ccol_row_value_size(
@@ -10429,8 +10425,8 @@ sparse_bsc_tensor_size :: proc(
         values,
         raw_data(size),
         i32(len(size)),
-        i32(options_kind),
-        i32(options_device),
+        i32(kind),
+        i32(device),
     )
     return track(out)
 }
@@ -10441,8 +10437,8 @@ sparse_bsr_tensor :: proc(
     crow_indices: Tensor,
     col_indices: Tensor,
     values: Tensor,
-    options_kind: i32 = 0,
-    options_device: i32 = 0,
+    kind: ScalarType = .Float,
+    device: DeviceType = .CPU,
 ) -> Tensor {
     out: Tensor
     t.atg_sparse_bsr_tensor(
@@ -10450,8 +10446,8 @@ sparse_bsr_tensor :: proc(
         crow_indices,
         col_indices,
         values,
-        i32(options_kind),
-        i32(options_device),
+        i32(kind),
+        i32(device),
     )
     return track(out)
 }
@@ -10461,8 +10457,8 @@ sparse_bsr_tensor_size :: proc(
     col_indices: Tensor,
     values: Tensor,
     size: []i64,
-    options_kind: i32 = 0,
-    options_device: i32 = 0,
+    kind: ScalarType = .Float,
+    device: DeviceType = .CPU,
 ) -> Tensor {
     out: Tensor
     t.atg_sparse_bsr_tensor_crow_col_value_size(
@@ -10472,8 +10468,8 @@ sparse_bsr_tensor_size :: proc(
         values,
         raw_data(size),
         i32(len(size)),
-        i32(options_kind),
-        i32(options_device),
+        i32(kind),
+        i32(device),
     )
     return track(out)
 }
@@ -10484,8 +10480,8 @@ sparse_compressed_tensor :: proc(
     compressed_indices: Tensor,
     plain_indices: Tensor,
     values: Tensor,
-    options_kind: i32 = 0,
-    options_device: i32 = 0,
+    kind: ScalarType = .Float,
+    device: DeviceType = .CPU,
 ) -> Tensor {
     out: Tensor
     t.atg_sparse_compressed_tensor(
@@ -10493,8 +10489,8 @@ sparse_compressed_tensor :: proc(
         compressed_indices,
         plain_indices,
         values,
-        i32(options_kind),
-        i32(options_device),
+        i32(kind),
+        i32(device),
     )
     return track(out)
 }
@@ -10504,8 +10500,8 @@ sparse_compressed_tensor_size :: proc(
     plain_indices: Tensor,
     values: Tensor,
     size: []i64,
-    options_kind: i32 = 0,
-    options_device: i32 = 0,
+    kind: ScalarType = .Float,
+    device: DeviceType = .CPU,
 ) -> Tensor {
     out: Tensor
     t.atg_sparse_compressed_tensor_comp_plain_value_size(
@@ -10515,8 +10511,8 @@ sparse_compressed_tensor_size :: proc(
         values,
         raw_data(size),
         i32(len(size)),
-        i32(options_kind),
-        i32(options_device),
+        i32(kind),
+        i32(device),
     )
     return track(out)
 }
@@ -10527,8 +10523,8 @@ sparse_csc_tensor :: proc(
     ccol_indices: Tensor,
     row_indices: Tensor,
     values: Tensor,
-    options_kind: i32 = 0,
-    options_device: i32 = 0,
+    kind: ScalarType = .Float,
+    device: DeviceType = .CPU,
 ) -> Tensor {
     out: Tensor
     t.atg_sparse_csc_tensor(
@@ -10536,8 +10532,8 @@ sparse_csc_tensor :: proc(
         ccol_indices,
         row_indices,
         values,
-        i32(options_kind),
-        i32(options_device),
+        i32(kind),
+        i32(device),
     )
     return track(out)
 }
@@ -10547,8 +10543,8 @@ sparse_csc_tensor_size :: proc(
     row_indices: Tensor,
     values: Tensor,
     size: []i64,
-    options_kind: i32 = 0,
-    options_device: i32 = 0,
+    kind: ScalarType = .Float,
+    device: DeviceType = .CPU,
 ) -> Tensor {
     out: Tensor
     t.atg_sparse_csc_tensor_ccol_row_value_size(
@@ -10558,8 +10554,8 @@ sparse_csc_tensor_size :: proc(
         values,
         raw_data(size),
         i32(len(size)),
-        i32(options_kind),
-        i32(options_device),
+        i32(kind),
+        i32(device),
     )
     return track(out)
 }
@@ -10570,8 +10566,8 @@ sparse_csr_tensor :: proc(
     crow_indices: Tensor,
     col_indices: Tensor,
     values: Tensor,
-    options_kind: i32 = 0,
-    options_device: i32 = 0,
+    kind: ScalarType = .Float,
+    device: DeviceType = .CPU,
 ) -> Tensor {
     out: Tensor
     t.atg_sparse_csr_tensor(
@@ -10579,8 +10575,8 @@ sparse_csr_tensor :: proc(
         crow_indices,
         col_indices,
         values,
-        i32(options_kind),
-        i32(options_device),
+        i32(kind),
+        i32(device),
     )
     return track(out)
 }
@@ -10590,8 +10586,8 @@ sparse_csr_tensor_size :: proc(
     col_indices: Tensor,
     values: Tensor,
     size: []i64,
-    options_kind: i32 = 0,
-    options_device: i32 = 0,
+    kind: ScalarType = .Float,
+    device: DeviceType = .CPU,
 ) -> Tensor {
     out: Tensor
     t.atg_sparse_csr_tensor_crow_col_value_size(
@@ -10601,8 +10597,8 @@ sparse_csr_tensor_size :: proc(
         values,
         raw_data(size),
         i32(len(size)),
-        i32(options_kind),
-        i32(options_device),
+        i32(kind),
+        i32(device),
     )
     return track(out)
 }
@@ -10610,16 +10606,16 @@ sparse_csr_tensor_size :: proc(
 // Creates an empty sparse tensor of a given size
 sparse_coo_tensor :: proc(
     size: []i64,
-    options_kind: i32 = 0,
-    options_device: i32 = 0,
+    kind: ScalarType = .Float,
+    device: DeviceType = .CPU,
 ) -> Tensor {
     out: Tensor
     t.atg_sparse_coo_tensor(
         &out,
         raw_data(size),
         i32(len(size)),
-        i32(options_kind),
-        i32(options_device),
+        i32(kind),
+        i32(device),
     )
     return track(out)
 }
@@ -10628,8 +10624,8 @@ sparse_coo_tensor :: proc(
 sparse_coo_tensor_indices :: proc(
     indices: Tensor,
     values: Tensor,
-    options_kind: i32 = 0,
-    options_device: i32 = 0,
+    kind: ScalarType = .Float,
+    device: DeviceType = .CPU,
     is_coalesced: bool = false,
 ) -> Tensor {
     out: Tensor
@@ -10638,8 +10634,8 @@ sparse_coo_tensor_indices :: proc(
         &out,
         indices,
         values,
-        i32(options_kind),
-        i32(options_device),
+        i32(kind),
+        i32(device),
         is_coalesced_int,
     )
     return track(out)
@@ -10650,8 +10646,8 @@ sparse_coo_tensor_indices_size :: proc(
     indices: Tensor,
     values: Tensor,
     size: []i64,
-    options_kind: i32 = 0,
-    options_device: i32 = 0,
+    kind: ScalarType = .Float,
+    device: DeviceType = .CPU,
     is_coalesced: bool = false,
 ) -> Tensor {
     out: Tensor
@@ -10662,8 +10658,8 @@ sparse_coo_tensor_indices_size :: proc(
         values,
         raw_data(size),
         i32(len(size)),
-        i32(options_kind),
-        i32(options_device),
+        i32(kind),
+        i32(device),
         is_coalesced_int,
     )
     return track(out)
@@ -11359,7 +11355,7 @@ special_xlog1py :: proc{
 }
 
 @private
-special_xlog1py_tensor :: proc(self: Tensor, other: Tensor) -> Tensor {
+special_xlog1py_tensor :: proc(self, other: Tensor) -> Tensor {
     out: Tensor
     t.atg_special_xlog1py(&out, self, other)
     return track(out)
@@ -11388,7 +11384,7 @@ special_xlogy :: proc{
 }
 
 @private
-special_xlogy_tensor :: proc(self: Tensor, other: Tensor) -> Tensor {
+special_xlogy_tensor :: proc(self, other: Tensor) -> Tensor {
     out: Tensor
     t.atg_special_xlogy(&out, self, other)
     return track(out)
@@ -11417,7 +11413,7 @@ special_zeta :: proc{
 }
 
 @private
-special_zeta_tensor :: proc(self: Tensor, other: Tensor) -> Tensor {
+special_zeta_tensor :: proc(self, other: Tensor) -> Tensor {
     out: Tensor
     t.atg_special_zeta(&out, self, other)
     return track(out)
@@ -11668,7 +11664,7 @@ sub :: proc{sub_tensor, sub_scalar}
 sub_ :: proc{sub_tensor_, sub_scalar_}
 
 @private
-sub_tensor :: proc(self: Tensor, other: Tensor) -> Tensor {
+sub_tensor :: proc(self, other: Tensor) -> Tensor {
     out: Tensor
     t.atg_sub(&out, self, other)
     return track(out)
@@ -11682,7 +11678,7 @@ sub_scalar :: proc(self: Tensor, other: Scalar) -> Tensor {
 }
 
 @private
-sub_tensor_ :: proc(self: Tensor, other: Tensor) -> Tensor {
+sub_tensor_ :: proc(self, other: Tensor) -> Tensor {
     out: Tensor
     t.atg_sub_(&out, self, other)
     return self
@@ -11699,7 +11695,7 @@ subtract :: proc{subtract_tensor, subtract_scalar}
 subtract_ :: proc{subtract_tensor_, subtract_scalar_}
 
 @private
-subtract_tensor :: proc(self: Tensor, other: Tensor) -> Tensor {
+subtract_tensor :: proc(self, other: Tensor) -> Tensor {
     out: Tensor
     t.atg_subtract(&out, self, other)
     return track(out)
@@ -11713,7 +11709,7 @@ subtract_scalar :: proc(self: Tensor, other: Scalar) -> Tensor {
 }
 
 @private
-subtract_tensor_ :: proc(self: Tensor, other: Tensor) -> Tensor {
+subtract_tensor_ :: proc(self, other: Tensor) -> Tensor {
     out: Tensor
     t.atg_subtract_(&out, self, other)
     return self
@@ -11935,7 +11931,7 @@ to_dtype :: proc(self: Tensor, dtype: ScalarType, non_blocking: bool = false, co
     return track(out)
 }
 
-to_other :: proc(self: Tensor, other: Tensor, non_blocking: bool = false, copy: bool = false) -> Tensor {
+to_other :: proc(self, other: Tensor, non_blocking: bool = false, copy: bool = false) -> Tensor {
     out: Tensor
     nb := i32(1) if non_blocking else i32(0)
     cp := i32(1) if copy else i32(0)
@@ -12209,8 +12205,8 @@ tril_indices :: proc(
     row: i64, 
     col: i64, 
     offset: i64 = 0, 
-    options_kind: i32 = 3,
-    options_device: i32 = DEFAULT_DEVICE,
+    kind: ScalarType = .Float,
+    device: DeviceType = DEFAULT_DEVICE,
 ) -> Tensor {
     out: Tensor
     t.atg_tril_indices(
@@ -12218,8 +12214,8 @@ tril_indices :: proc(
         row, 
         col, 
         offset, 
-        i32(options_kind), 
-        i32(options_device),
+        i32(kind), 
+        i32(device),
     )
     return track(out)
 }
@@ -12242,8 +12238,8 @@ triu_indices :: proc(
     row: i64, 
     col: i64, 
     offset: i64 = 0, 
-    options_kind: i32 = 3, 
-    options_device: i32 = DEFAULT_DEVICE,
+    kind: ScalarType = .Float,
+    device: DeviceType = DEFAULT_DEVICE,
 ) -> Tensor {
     out: Tensor
     t.atg_triu_indices(
@@ -12251,8 +12247,8 @@ triu_indices :: proc(
         row, 
         col, 
         offset, 
-        i32(options_kind), 
-        i32(options_device),
+        i32(kind), 
+        i32(device),
     )
     return track(out)
 }
@@ -12288,7 +12284,7 @@ true_divide :: proc{true_divide_tensor, true_divide_scalar}
 true_divide_ :: proc{true_divide_tensor_, true_divide_scalar_}
 
 @private
-true_divide_tensor :: proc(self: Tensor, other: Tensor) -> Tensor {
+true_divide_tensor :: proc(self, other: Tensor) -> Tensor {
     out: Tensor
     t.atg_true_divide(&out, self, other)
     return track(out)
@@ -12302,7 +12298,7 @@ true_divide_scalar :: proc(self: Tensor, other: Scalar) -> Tensor {
 }
 
 @private
-true_divide_tensor_ :: proc(self: Tensor, other: Tensor) -> Tensor {
+true_divide_tensor_ :: proc(self, other: Tensor) -> Tensor {
     out: Tensor
     t.atg_true_divide_(&out, self, other)
     return self
@@ -12331,7 +12327,7 @@ trunc_ :: proc(self: Tensor) -> Tensor {
 
 // TYPE AS
 
-type_as :: proc(self: Tensor, other: Tensor) -> Tensor {
+type_as :: proc(self, other: Tensor) -> Tensor {
     out: Tensor
     t.atg_type_as(&out, self, other)
     return track(out)
@@ -13160,7 +13156,7 @@ vander :: proc(x: Tensor, n: int = 0, increasing: bool = false) -> Tensor {
     return track(out)
 }
 
-vdot :: proc(self: Tensor, other: Tensor) -> Tensor {
+vdot :: proc(self, other: Tensor) -> Tensor {
     out: Tensor
     t.atg_vdot(&out, self, other)
     return track(out)
@@ -13240,7 +13236,7 @@ view_dtype :: proc(self: Tensor, dtype: ScalarType) -> Tensor {
     return track(out)
 }
 
-view_as :: proc(self: Tensor, other: Tensor) -> Tensor {
+view_as :: proc(self, other: Tensor) -> Tensor {
     out: Tensor
     t.atg_view_as(&out, self, other)
     return track(out)
@@ -13293,7 +13289,7 @@ vstack :: proc(tensors: []Tensor) -> Tensor {
 where_self :: proc{where_tensor, where_scalar_scalar, where_scalar_tensor, where_tensor_scalar}
 
 @private
-where_tensor :: proc(condition: Tensor, self: Tensor, other: Tensor) -> Tensor {
+where_tensor :: proc(condition: Tensor, self, other: Tensor) -> Tensor {
     out: Tensor
     t.atg_where_self(&out, condition, self, other)
     return track(out)
@@ -13324,14 +13320,14 @@ xlogy :: proc{xlogy_tensor, xlogy_scalar_other, xlogy_scalar_self}
 xlogy_ :: proc{xlogy_tensor_, xlogy_scalar_other_}
 
 @private
-xlogy_tensor :: proc(self: Tensor, other: Tensor) -> Tensor {
+xlogy_tensor :: proc(self, other: Tensor) -> Tensor {
     out: Tensor
     t.atg_xlogy(&out, self, other)
     return track(out)
 }
 
 @private
-xlogy_tensor_ :: proc(self: Tensor, other: Tensor) -> Tensor {
+xlogy_tensor_ :: proc(self, other: Tensor) -> Tensor {
     out: Tensor
     t.atg_xlogy_(&out, self, other)
     return self
@@ -13362,7 +13358,7 @@ xlogy_scalar_self :: proc(self: Scalar, other: Tensor) -> Tensor {
 xlogy_out :: proc{xlogy_out_tensor, xlogy_out_scalar_other, xlogy_out_scalar_self}
 
 @private
-xlogy_out_tensor :: proc(self: Tensor, other: Tensor) -> Tensor {
+xlogy_out_tensor :: proc(self, other: Tensor) -> Tensor {
     out: Tensor
     t.atg_xlogy_outtensor(&out, self, other)
     return track(out)
@@ -13394,7 +13390,7 @@ zero_ :: proc(self: Tensor) -> Tensor {
     return self
 }
 
-zeros :: proc(size: []i64, dtype: ScalarType = .Float, device: i32 = DEFAULT_DEVICE) -> Tensor {
+zeros :: proc(size: []i64, dtype: ScalarType = .Float, device: DeviceType = DEFAULT_DEVICE) -> Tensor {
     out: Tensor
     t.atg_zeros(&out, raw_data(size), i32(len(size)), i32(dtype), i32(device))
     return track(out)
