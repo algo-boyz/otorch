@@ -212,8 +212,7 @@ defined :: proc(self: Tensor) -> i32 {
 }
 
 new_tensor :: proc() -> Tensor {
-    out: Tensor = nil 
-    return out 
+    return t.at_new_tensor() 
 }
 
 free_tensor :: proc(self: Tensor) {
@@ -7602,14 +7601,14 @@ mul_scalar :: proc(self: Tensor, other: Scalar) -> Tensor {
 
 @private
 mul_tensor_ :: proc(self, other: Tensor) -> Tensor {
-    out := new_tensor()
+    out: Tensor
     t.atg_mul_(&out, self, other)
     return self
 }
 
 @private
 mul_scalar_ :: proc(self: Tensor, other: Scalar) -> Tensor {
-    out := new_tensor()
+    out: Tensor
     t.atg_mul_scalar_(&out, self, other)
     return self
 }

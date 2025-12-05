@@ -49,8 +49,8 @@ main :: proc() {
     ot.print(res)
 
     s5 := ot.scalar(5.0)
-    res2 := ot.mul(tensor, s5)
+    ot.mul_(tensor, s5)
     fmt.println("\n[Result of tensor mul scalar:]")
-    ot.print(res2)
+    ot.print(tensor)
     fmt.println("\nDone")
 }
