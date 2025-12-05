@@ -80,7 +80,7 @@ parse_and_print_func :: proc(line: string) {
 }
 
 // Moves '*' from the variable name to the type side.
-// e.g., "int64_t" "*out" -> "int64_t *" "out"
+// eg "int64_t" "*out" -> "int64_t *" "out"
 split_type_and_name :: proc(arg: string) -> (type: string, name: string) {
     last_space := strings.last_index(arg, " ")
     

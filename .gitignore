@@ -3,6 +3,8 @@
 **/build/
 **/libtorch/
 **.h
+ffi/torch_api.cpp
+ffi/torch_api_generated.cpp
 **.so
 **.lib
 **.dll

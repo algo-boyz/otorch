@@ -1,7 +1,6 @@
 
-<h1 align="center">█▬▬𒄆 (◡̀_◡́)d𓌏nϟ 𒅒▬▬█</h1>
 <p align="center">
-    <img src="otorch.png" alt="oTorch" width="960">
+    <img src="etc/otorch.png" alt="oTorch" width="960">
 </p>
 
 Odin bindings for the C++ api of PyTorch. The goal is to provide a thin wrapper around the C++ PyTorch api (a.k.a. libtorch). Staying as close as possible to the original.
@@ -52,8 +51,8 @@ TODO should not be all to hard just don't have windows personally.
 Contribution welcome!
 ```
 
-### 3\. How to Use
-Check out the demo folder:
+### How to Use
+Check the demo folder:
 
 ```odin
 
@@ -74,9 +73,8 @@ Tensor created successfully!
  99  99  99
 [ CPUFloatType{2,3} ]
 
-Done
 ```
 
-# TODO: port some more examples
+# TODO: add more examples
 
-https://github.com/pytorch/examples
+- https://github.com/pytorch/examples

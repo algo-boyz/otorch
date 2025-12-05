@@ -40,9 +40,17 @@ main :: proc() {
     fmt.println("\n[LibTorch Output]:")
     ot.print(tensor)
 
-    fmt.println("\n[Filling tensor with 99's]")
-    ot.fill(tensor, 99)
+    fmt.println("\n[Filling tensor with 1's]")
+    ot.fill(tensor, 1)
     ot.print(tensor)
 
+    res := ot.mul(tensor, tensor)
+    fmt.println("\n[Result of tensor mul tensor:]")
+    ot.print(res)
+
+    s5 := ot.scalar(5.0)
+    res2 := ot.mul(tensor, s5)
+    fmt.println("\n[Result of tensor mul scalar:]")
+    ot.print(res2)
     fmt.println("\nDone")
 }

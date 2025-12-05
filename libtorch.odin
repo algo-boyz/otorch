@@ -33,27 +33,27 @@ Reduction :: enum i64 {
 }
 
 DeviceType :: enum i32 {
-    CPU  = 0,
-    CUDA = 1,
-    MKLDNN = 2, // Reserved for explicit MKLDNN
-    OPENGL = 3,
-    OPENCL = 4,
-    IDEEP = 5,
-    HIP = 6,
-    FPGA = 7,
-    MAIA = 8,
-    XLA = 9,
-    Vulkan = 10,
-    Metal = 11,
-    XPU = 12,
-    MPS = 13,
-    Meta = 14,
-    HPU = 15,
-    VE = 16,
-    Lazy = 17,
-    IPU = 18,
-    MTIA = 19,
-    PrivateUse1 = 20,
+    CPU  = -1,
+    CUDA = 0,
+    MKLDNN = 1, // Reserved for explicit MKLDNN
+    OPENGL = 2,
+    OPENCL = 3,
+    IDEEP = 4,
+    HIP = 5,
+    FPGA = 6,
+    MAIA = 7,
+    XLA = 8,
+    Vulkan = 9,
+    Metal = 10,
+    XPU = 11,
+    MPS = 12,
+    Meta = 13,
+    HPU = 14,
+    VE = 15,
+    Lazy = 16,
+    IPU = 17,
+    MTIA = 18,
+    PrivateUse1 = 19,
 }
 
 // POOL MECHANICS
@@ -102,9 +102,12 @@ keep :: proc{keep_tensor, keep_scalar, keep_ivalue}
 @(private)
 keep_tensor :: proc(wrapped: Tensor) -> Tensor {
     raw_target := t.Tensor(wrapped)
+    
+    // Iterate backwards
     for i := len(private_tensor_pool) - 1; i >= 0; i -= 1 {
         if private_tensor_pool[i] == raw_target {
-            ordered_remove(&private_tensor_pool, i)
+            // Swap-remove is O(1) and safe here since order of cleanup doesn't matter
+            unordered_remove(&private_tensor_pool, i) 
             return wrapped
         }
     }
@@ -113,11 +116,9 @@ keep_tensor :: proc(wrapped: Tensor) -> Tensor {
 
 @(private)
 keep_scalar :: proc(wrapped: Scalar) -> Scalar {
-    // No distinct type cast needed if Scalar is just an alias, 
-    // but useful if you wrap Scalar in a struct later.
     for i := len(private_scalar_pool) - 1; i >= 0; i -= 1 {
         if private_scalar_pool[i] == wrapped {
-            ordered_remove(&private_scalar_pool, i)
+            unordered_remove(&private_scalar_pool, i)
             return wrapped
         }
     }
@@ -211,7 +212,8 @@ defined :: proc(self: Tensor) -> i32 {
 }
 
 new_tensor :: proc() -> Tensor {
-    return track(t.at_new_tensor())
+    out: Tensor = nil 
+    return out 
 }
 
 free_tensor :: proc(self: Tensor) {
@@ -249,8 +251,15 @@ tensor_from_data :: proc(
     return track(out)
 }
 
-tensor_from_slice :: proc(data: []$T, dims: []i64,) -> Tensor {
-    dtype := ScalarType.Float 
+tensor_from_slice :: proc(data: []$T, dims: []i64) -> Tensor {
+    // 1. Determine Type
+    dtype: ScalarType
+    when T == f32 { dtype = .Float }
+    else when T == f64 { dtype = .Double }
+    else when T == i32 { dtype = .Int }
+    else when T == i64 { dtype = .Long }
+    else when T == u8  { dtype = .Byte }
+    else { fmt.panicf("Unsupported Tensor type: %v", typeid_of(T)) }
     
     out := t.at_tensor_of_data(
         raw_data(data),
@@ -259,7 +268,6 @@ tensor_from_slice :: proc(data: []$T, dims: []i64,) -> Tensor {
         size_of(T),
         i32(dtype),
     )
-    // Important: Cast returned result to your distinct type!
     return track(out)
 }
 
@@ -373,7 +381,7 @@ tensor_from_blob :: proc(
     dims: []i64,
     strides: []i64,
     type: ScalarType,
-    device: int, // e.g., 0 for CPU, or specific CUDA index
+    device: DeviceType = .CPU,
 ) -> Tensor {
     out := t.at_tensor_of_blob(
         data,
@@ -390,7 +398,7 @@ tensor_from_blob :: proc(
 tensor_from_slice_blob :: proc(
     data: []$T, 
     dims: []i64, 
-    device: int = 0 // Default to CPU/Device 0
+    device: DeviceType = .CPU
 ) -> Tensor {
     // 1. Infer ScalarType from $T
     dtype: ScalarType
@@ -878,7 +886,7 @@ m_load :: proc(filename: string) -> Module {
     return track(t.atm_load(c_filename))
 }
 
-m_load_on_device :: proc(filename: string, device: int) -> Module {
+m_load_on_device :: proc(filename: string, device: DeviceType = .CPU) -> Module {
     c_filename := strings.clone_to_cstring(filename, context.temp_allocator)
     return track(t.atm_load_on_device(c_filename, i32(device)))
 }
@@ -888,7 +896,7 @@ m_load_str :: proc(data: string) -> Module {
     return track(t.atm_load_str(c_data, c.size_t(len(data))))
 }
 
-m_load_str_on_device :: proc(data: string, device: int) -> Module {
+m_load_str_on_device :: proc(data: string, device: DeviceType = .CPU) -> Module {
     c_data := strings.clone_to_cstring(data, context.temp_allocator)
     return track(t.atm_load_str_on_device(c_data, c.size_t(len(data)), i32(device)))
 }
@@ -930,7 +938,7 @@ m_free :: proc(m: Module) {
     t.atm_free(m)
 }
 
-m_to :: proc(m: Module, device: int, dtype: int, non_blocking: bool) {
+m_to :: proc(m: Module, device: DeviceType = .CPU, dtype: ScalarType = .Float, non_blocking: bool = false) {
     t.atm_to(m, i32(device), i32(dtype), non_blocking)
 }
 
@@ -971,7 +979,7 @@ m_end_tracing :: proc(m: Module, fn_name: string, outputs: []Tensor) {
     t.atm_end_tracing(m, c_name, raw_data(outputs), i32(len(outputs)))
 }
 
-// IValue Constructors (Creators)
+// IValue Constructors
 
 i_none :: proc() -> IValue {
     return track(t.ati_none())
@@ -1010,7 +1018,6 @@ i_generic_list :: proc(items: []IValue) -> IValue {
 }
 
 i_generic_dict :: proc(items: []IValue) -> IValue {
-    // NOTE: Dictionary inputs usually expect (Key, Value, Key, Value) or [(K,V)]
     if len(items) == 0 { return track(t.ati_generic_dict(nil, 0)) }
     return track(t.ati_generic_dict(raw_data(items), i32(len(items))))
 }
@@ -1628,8 +1635,7 @@ autocast_to_full_precision :: proc(self: Tensor, cuda_enabled: bool, cpu_enabled
 
 autocast_to_reduced_precision :: proc(
     self: Tensor, 
-    cuda_enabled: bool, 
-    cpu_enabled: bool, 
+    cuda_enabled, cpu_enabled: bool, 
     cuda_dtype: ScalarType, 
     cpu_dtype: ScalarType
 ) -> Tensor {
@@ -2325,7 +2331,7 @@ mkldnn_reshape :: proc(self: Tensor, shape: []i64) -> Tensor {
     return track(out)
 }
 
-make_dep_token :: proc(device: DeviceType) -> Tensor {
+make_dep_token :: proc(device: DeviceType = .CPU) -> Tensor {
     out: Tensor
     t.atg__make_dep_token(&out, 0, i32(device)) 
     return track(out)
@@ -2686,25 +2692,25 @@ affine_grid_generator :: proc(theta: Tensor, size: []i64, align_corners: bool) -
     return track(out)
 }
 
-arange_end :: proc(end: Scalar, dtype: i32, device: DeviceType) -> Tensor {
+arange_end :: proc(end: Scalar, dtype: ScalarType = .Float, device: DeviceType = .CPU) -> Tensor {
     out: Tensor
     t.atg_arange(&out, end, i32(dtype), i32(device))
     return track(out)
 }
 
-arange_start :: proc(start, end: Scalar, dtype: i32, device: DeviceType) -> Tensor {
+arange_start :: proc(start, end: Scalar, dtype: ScalarType = .Float, device: DeviceType = .CPU) -> Tensor {
     out: Tensor
     t.atg_arange_start(&out, start, end, i32(dtype), i32(device))
     return track(out)
 }
 
-arange_step :: proc(start, end, step: Scalar, dtype: i32, device: DeviceType) -> Tensor {
+arange_step :: proc(start, end, step: Scalar, dtype: ScalarType = .Float, device: DeviceType = .CPU) -> Tensor {
     out: Tensor
     t.atg_arange_start_step(&out, start, end, step, i32(dtype), i32(device))
     return track(out)
 }
 
-bartlett_window :: proc(window_length: i64, periodic: bool = true, dtype: i32, device: DeviceType) -> Tensor {
+bartlett_window :: proc(window_length: i64, periodic: bool = true, dtype: ScalarType = .Float, device: DeviceType = .CPU) -> Tensor {
     out: Tensor
     p_int := i32(1) if periodic else i32(0)
     t.atg_bartlett_window_periodic(&out, window_length, p_int, i32(dtype), i32(device))
@@ -2956,7 +2962,7 @@ bilinear :: proc(input1, input2, weight, bias: Tensor) -> Tensor {
     return track(out)
 }
 
-blackman_window :: proc(window_length: i64, periodic: bool = true, dtype: i32 = 6 /*Float*/, device: DeviceType = .CPU) -> Tensor {
+blackman_window :: proc(window_length: i64, periodic: bool = true, dtype: ScalarType = .Float, device: DeviceType = .CPU) -> Tensor {
     out: Tensor
     if periodic {
         t.atg_blackman_window_periodic(&out, window_length, 1, i32(dtype), i32(device))
@@ -5682,21 +5688,21 @@ ldexp_ :: proc(self, other: Tensor) -> Tensor {
     return self
 }
 
-kaiser_window_simple :: proc(window_length: i64, device: DeviceType = .CPU, dtype: i32 = -1) -> Tensor {
+kaiser_window_simple :: proc(window_length: i64, device: DeviceType = .CPU, dtype: ScalarType = .Float) -> Tensor {
     out: Tensor
-    t.atg_kaiser_window(&out, window_length, dtype, i32(device))
+    t.atg_kaiser_window(&out, window_length, i32(dtype), i32(device))
     return track(out)
 }
 
-kaiser_window_beta :: proc(window_length: i64, periodic: bool, beta: f64, device: DeviceType = .CPU, dtype: i32 = -1) -> Tensor {
+kaiser_window_beta :: proc(window_length: i64, periodic: bool, beta: f64, device: DeviceType = .CPU, dtype: ScalarType = .Float) -> Tensor {
     out: Tensor
-    t.atg_kaiser_window_beta(&out, window_length, i32(periodic), beta, dtype, i32(device))
+    t.atg_kaiser_window_beta(&out, window_length, i32(periodic), beta, i32(dtype), i32(device))
     return track(out)
 }
 
-kaiser_window_periodic :: proc(window_length: i64, periodic: bool, device: DeviceType = .CPU, dtype: i32 = -1) -> Tensor {
+kaiser_window_periodic :: proc(window_length: i64, periodic: bool, device: DeviceType = .CPU, dtype: ScalarType = .Float) -> Tensor {
     out: Tensor
-    t.atg_kaiser_window_periodic(&out, window_length, i32(periodic), dtype, i32(device))
+    t.atg_kaiser_window_periodic(&out, window_length, i32(periodic), i32(dtype), i32(device))
     return track(out)
 }
 
@@ -5919,7 +5925,7 @@ linalg_cond_str :: proc(self: Tensor, p: string) -> Tensor {
     return track(out)
 }
 
-linalg_norm :: proc(self: Tensor, ord: Scalar, dim: []i64 = nil, keepdim: bool = false, dtype: i32 = 6 /*Float*/) -> Tensor {
+linalg_norm :: proc(self: Tensor, ord: Scalar, dim: []i64 = nil, keepdim: bool = false, dtype: ScalarType = .Float) -> Tensor {
     out: Tensor
     keep_int := i32(1) if keepdim else i32(0)
     
@@ -5935,7 +5941,7 @@ linalg_norm :: proc(self: Tensor, ord: Scalar, dim: []i64 = nil, keepdim: bool =
     return track(out)
 }
 
-linalg_norm_str :: proc(self: Tensor, ord: string, dim: []i64 = nil, keepdim: bool = false, dtype: i32 = 6) -> Tensor {
+linalg_norm_str :: proc(self: Tensor, ord: string, dim: []i64 = nil, keepdim: bool = false, dtype: ScalarType = .Float) -> Tensor {
     out: Tensor
     ord_cstr := strings.clone_to_cstring(ord, context.temp_allocator)
     keep_int := i32(1) if keepdim else i32(0)
@@ -6546,28 +6552,28 @@ logspace :: proc{
 }
 
 @private
-logspace_scalar_scalar :: proc(start, end: Scalar, steps: i64, base: f64 = 10.0, dtype: i32 = 0, device: DeviceType = .CPU) -> Tensor {
+logspace_scalar_scalar :: proc(start, end: Scalar, steps: i64, base: f64 = 10.0, dtype: ScalarType = .Float, device: DeviceType = .CPU) -> Tensor {
     out: Tensor
     t.atg_logspace(&out, start, end, steps, base, i32(dtype), i32(device))
     return track(out)
 }
 
 @private
-logspace_scalar_tensor :: proc(start: Scalar, end: Tensor, steps: i64, base: f64 = 10.0, dtype: i32 = 0, device: DeviceType = .CPU) -> Tensor {
+logspace_scalar_tensor :: proc(start: Scalar, end: Tensor, steps: i64, base: f64 = 10.0, dtype: ScalarType = .Float, device: DeviceType = .CPU) -> Tensor {
     out: Tensor
     t.atg_logspace_scalar_tensor(&out, start, end, steps, base, i32(dtype), i32(device))
     return track(out)
 }
 
 @private
-logspace_tensor_scalar :: proc(start: Tensor, end: Scalar, steps: i64, base: f64 = 10.0, dtype: i32 = 0, device: DeviceType = .CPU) -> Tensor {
+logspace_tensor_scalar :: proc(start: Tensor, end: Scalar, steps: i64, base: f64 = 10.0, dtype: ScalarType = .Float, device: DeviceType = .CPU) -> Tensor {
     out: Tensor
     t.atg_logspace_tensor_scalar(&out, start, end, steps, base, i32(dtype), i32(device))
     return track(out)
 }
 
 @private
-logspace_tensor_tensor :: proc(start, end: Tensor, steps: i64, base: f64 = 10.0, dtype: i32 = 0, device: DeviceType = .CPU) -> Tensor {
+logspace_tensor_tensor :: proc(start, end: Tensor, steps: i64, base: f64 = 10.0, dtype: ScalarType = .Float, device: DeviceType = .CPU) -> Tensor {
     out: Tensor
     t.atg_logspace_tensor_tensor(&out, start, end, steps, base, i32(dtype), i32(device))
     return track(out)
@@ -7596,14 +7602,14 @@ mul_scalar :: proc(self: Tensor, other: Scalar) -> Tensor {
 
 @private
 mul_tensor_ :: proc(self, other: Tensor) -> Tensor {
-    out: Tensor
+    out := new_tensor()
     t.atg_mul_(&out, self, other)
     return self
 }
 
 @private
 mul_scalar_ :: proc(self: Tensor, other: Scalar) -> Tensor {
-    out: Tensor
+    out := new_tensor()
     t.atg_mul_scalar_(&out, self, other)
     return self
 }
@@ -8913,7 +8919,7 @@ randn :: proc(
 ) -> Tensor {
     out: Tensor
     t.atg_randn(
-        &out, 
+        &out,
         raw_data(size), 
         i32(len(size)), 
         i32(dtype), 
@@ -9020,7 +9026,7 @@ reciprocal_ :: proc(self: Tensor) -> Tensor {
 
 // REFLECTION PAD
 
-/* NOTE: Padding must be supplied as a slice of ints (e.g., {1, 1} for 1D, {1, 1, 2, 2} for 2D).
+/* NOTE: Padding must be supplied as a slice of ints (eg {1, 1} for 1D, {1, 1, 2, 2} for 2D).
    Torch expects padding pairs to be [left, right, top, bottom, front, back].
 */
 
@@ -11905,8 +11911,8 @@ tile :: proc(self: Tensor, dims: []i64) -> Tensor {
 
 // TO Conversion
 
-// Moves tensor to a specific device index (e.g., 0 for CUDA:0, -1 for CPU)
-to_device :: proc(self: Tensor, device: int, dtype: ScalarType, non_blocking: bool = false, copy: bool = false) -> Tensor {
+// Moves tensor to a specific device index (eg 0 for CUDA:0, -1 for CPU)
+to_device :: proc(self: Tensor, device: DeviceType = .CPU, dtype: ScalarType, non_blocking: bool = false, copy: bool = false) -> Tensor {
     out: Tensor
     nb := i32(1) if non_blocking else i32(0)
     cp := i32(1) if copy else i32(0)
@@ -11916,7 +11922,7 @@ to_device :: proc(self: Tensor, device: int, dtype: ScalarType, non_blocking: bo
 }
 
 // Simple alias for standard .to(device_index)
-to_index :: proc(self: Tensor, device: int) -> Tensor {
+to_index :: proc(self: Tensor, device: DeviceType = .CPU) -> Tensor {
     out: Tensor
     t.atg_to(&out, self, i32(device))
     return track(out)
