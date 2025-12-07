@@ -31,6 +31,11 @@ Reduction :: enum i64 {
     Mean = 1,
     Sum  = 2,
 }
+Reductions := [Reduction]string {
+    .None = "none",
+    .Mean = "mean",
+    .Sum  = "sum",
+}
 
 DeviceType :: enum i32 {
     CPU  = -1,
@@ -6480,7 +6485,7 @@ log_sigmoid :: proc(self: Tensor) -> Tensor {
 }
 
 // Log Softmax
-log_softmax :: proc(self: Tensor, dim: i64, dtype: ScalarType) -> Tensor {
+log_softmax :: proc(self: Tensor, dim: i64, dtype: ScalarType = .Float) -> Tensor {
     out: Tensor
     t.atg_log_softmax(&out, self, dim, i32(dtype))
     return track(out)
@@ -6848,7 +6853,7 @@ max_dim :: proc(self: Tensor, dim: i64, keepdim: bool = false) -> (values, indic
     return values, indices
 }
 
-mean :: proc(self: Tensor, dtype: ScalarType) -> Tensor {
+mean :: proc(self: Tensor, dtype: ScalarType = .Float) -> Tensor {
     out: Tensor
     t.atg_mean(&out, self, i32(dtype))
     return track(out)
@@ -7546,7 +7551,7 @@ mm :: proc(self, mat2: Tensor) -> Tensor {
     return track(out)
 }
 
-mm_dtype :: proc(self, mat2: Tensor, dtype: ScalarType) -> Tensor {
+mm_dtype :: proc(self, mat2: Tensor, dtype: ScalarType = .Float) -> Tensor {
     out: Tensor
     t.atg_mm_dtype(&out, self, mat2, i32(dtype))
     return track(out)
@@ -7755,21 +7760,18 @@ nanmean :: proc(
     self: Tensor, 
     dim: []i64 = nil, 
     keepdim: bool = false, 
-    dtype: Maybe(ScalarType) = nil
+    dtype: ScalarType = .Float
 ) -> Tensor {
     out: Tensor
     kd_int := i32(1) if keepdim else i32(0)
     
-    dt_int := i32(dtype.?) if dtype != nil else i32(6) 
-    actual_dtype := i32(dtype.?) if dtype != nil else i32(-1) 
-
     t.atg_nanmean(
         &out, 
         self, 
         raw_data(dim), 
         i32(len(dim)), 
         kd_int, 
-        actual_dtype
+        i32(dtype)
     )
     return track(out)
 }
@@ -7778,11 +7780,10 @@ nansum :: proc(
     self: Tensor, 
     dim: []i64 = nil, 
     keepdim: bool = false, 
-    dtype: Maybe(ScalarType) = nil
+    dtype: ScalarType = .Float
 ) -> Tensor {
     out: Tensor
     kd_int := i32(1) if keepdim else i32(0)
-    actual_dtype := i32(dtype.?) if dtype != nil else i32(-1)
 
     t.atg_nansum(
         &out, 
@@ -7790,7 +7791,7 @@ nansum :: proc(
         raw_data(dim), 
         i32(len(dim)), 
         kd_int, 
-        actual_dtype
+        i32(dtype),
     )
     return track(out)
 }
@@ -8313,14 +8314,14 @@ norm_p :: proc(self: Tensor, p: Scalar, dim: []i64, keepdim: bool = false) -> Te
     return track(out)
 }
 
-norm_p_dtype :: proc(self: Tensor, p: Scalar, dim: []i64, keepdim: bool, dtype: ScalarType) -> Tensor {
+norm_p_dtype :: proc(self: Tensor, p: Scalar, dim: []i64, keepdim: bool, dtype: ScalarType = .Float) -> Tensor {
     out: Tensor
     keep_int := i32(1) if keepdim else i32(0)
     t.atg_norm_scalaropt_dim_dtype(&out, self, p, raw_data(dim), i32(len(dim)), keep_int, i32(dtype))
     return track(out)
 }
 
-norm_dtype :: proc(self: Tensor, p: Scalar, dtype: ScalarType) -> Tensor {
+norm_dtype :: proc(self: Tensor, p: Scalar, dtype: ScalarType = .Float) -> Tensor {
     out: Tensor
     t.atg_norm_scalaropt_dtype(&out, self, p, i32(dtype))
     return track(out)
@@ -8705,13 +8706,13 @@ quantile_scalar :: proc(
 
 // QUANTIZE
 
-quantize_per_channel :: proc(self, scales, zero_points: Tensor, axis: i64, dtype: ScalarType) -> Tensor {
+quantize_per_channel :: proc(self, scales, zero_points: Tensor, axis: i64, dtype: ScalarType = .Float) -> Tensor {
     out: Tensor
     t.atg_quantize_per_channel(&out, self, scales, zero_points, axis, i32(dtype))
     return track(out)
 }
 
-quantize_per_tensor :: proc(self: Tensor, scale: f64, zero_point: i64, dtype: ScalarType) -> Tensor {
+quantize_per_tensor :: proc(self: Tensor, scale: f64, zero_point: i64, dtype: ScalarType = .Float) -> Tensor {
     out: Tensor
     t.atg_quantize_per_tensor(&out, self, scale, zero_point, i32(dtype))
     return track(out)
@@ -8724,7 +8725,7 @@ quantize_per_tensor_dynamic :: proc(self: Tensor, dtype: ScalarType, reduce_rang
     return track(out)
 }
 
-quantize_per_tensor_tensor_qparams :: proc(self, scale, zero_point: Tensor, dtype: ScalarType) -> Tensor {
+quantize_per_tensor_tensor_qparams :: proc(self, scale, zero_point: Tensor, dtype: ScalarType = .Float) -> Tensor {
     out: Tensor
     t.atg_quantize_per_tensor_tensor_qparams(&out, self, scale, zero_point, i32(dtype))
     return track(out)
@@ -9808,30 +9809,34 @@ scatter_reduce :: proc{scatter_reduce_tensor, scatter_reduce_value}
 scatter_reduce_ :: proc{scatter_reduce_tensor_, scatter_reduce_value_}
 
 @private
-scatter_reduce_tensor :: proc(self: Tensor, dim: i64, index: Tensor, src: Tensor, reduce: string) -> Tensor {
+scatter_reduce_tensor :: proc(self: Tensor, dim: i64, index: Tensor, src: Tensor, reduce: Reduction = .None) -> Tensor {
     out: Tensor
-    t.atg_scatter_reduce(&out, self, dim, index, src, cstring(raw_data(reduce)), i32(len(reduce)))
+    reduce_str := Reductions[reduce]
+    t.atg_scatter_reduce(&out, self, dim, index, src, cstring(raw_data(reduce_str)), i32(len(reduce_str)))
     return track(out)
 }
 
 @private
-scatter_reduce_tensor_ :: proc(self: Tensor, dim: i64, index: Tensor, src: Tensor, reduce: string) -> Tensor {
+scatter_reduce_tensor_ :: proc(self: Tensor, dim: i64, index: Tensor, src: Tensor, reduce: Reduction = .None) -> Tensor {
     out: Tensor
-    t.atg_scatter_reduce_(&out, self, dim, index, src, cstring(raw_data(reduce)), i32(len(reduce)))
+    reduce_str := Reductions[reduce]
+    t.atg_scatter_reduce_(&out, self, dim, index, src, cstring(raw_data(reduce_str)), i32(len(reduce_str)))
     return self
 }
 
 @private
-scatter_reduce_value :: proc(self: Tensor, dim: i64, index: Tensor, value: Scalar, reduce: string) -> Tensor {
+scatter_reduce_value :: proc(self: Tensor, dim: i64, index: Tensor, value: Scalar, reduce: Reduction = .None) -> Tensor {
     out: Tensor
-    t.atg_scatter_value_reduce(&out, self, dim, index, value, cstring(raw_data(reduce)), i32(len(reduce)))
+    reduce_str := Reductions[reduce]
+    t.atg_scatter_value_reduce(&out, self, dim, index, value, cstring(raw_data(reduce_str)), i32(len(reduce_str)))
     return track(out)
 }
 
 @private
-scatter_reduce_value_ :: proc(self: Tensor, dim: i64, index: Tensor, value: Scalar, reduce: string) -> Tensor {
+scatter_reduce_value_ :: proc(self: Tensor, dim: i64, index: Tensor, value: Scalar, reduce: Reduction = .None) -> Tensor {
     out: Tensor
-    t.atg_scatter_value_reduce_(&out, self, dim, index, value, cstring(raw_data(reduce)), i32(len(reduce)))
+    reduce_str := Reductions[reduce]
+    t.atg_scatter_value_reduce_(&out, self, dim, index, value, cstring(raw_data(reduce_str)), i32(len(reduce_str)))
     return self
 }
 
@@ -11203,7 +11208,7 @@ special_log_ndtr :: proc(self: Tensor) -> Tensor {
     return track(out)
 }
 
-special_log_softmax :: proc(self: Tensor, dim: i64, dtype: ScalarType) -> Tensor {
+special_log_softmax :: proc(self: Tensor, dim: i64, dtype: ScalarType = .Float) -> Tensor {
     out: Tensor
     t.atg_special_log_softmax(&out, self, dim, i32(dtype))
     return track(out)
@@ -11296,7 +11301,7 @@ special_sinc :: proc(self: Tensor) -> Tensor {
     return track(out)
 }
 
-special_softmax :: proc(self: Tensor, dim: i64, dtype: ScalarType) -> Tensor {
+special_softmax :: proc(self: Tensor, dim: i64, dtype: ScalarType = .Float) -> Tensor {
     out: Tensor
     t.atg_special_softmax(&out, self, dim, i32(dtype))
     return track(out)
@@ -12022,7 +12027,7 @@ to_dense :: proc(self: Tensor, dtype: ScalarType, masked_grad: bool = false) -> 
     return track(out)
 }
 
-to_mkldnn :: proc(self: Tensor, dtype: ScalarType) -> Tensor {
+to_mkldnn :: proc(self: Tensor, dtype: ScalarType = .Float) -> Tensor {
     out: Tensor
     t.atg_to_mkldnn(&out, self, i32(dtype))
     return track(out)
@@ -13302,7 +13307,7 @@ view_size :: proc(self: Tensor, size: []i64) -> Tensor {
 }
 
 @private
-view_dtype :: proc(self: Tensor, dtype: ScalarType) -> Tensor {
+view_dtype :: proc(self: Tensor, dtype: ScalarType = .Float) -> Tensor {
     out: Tensor
     t.atg_view_dtype(&out, self, i32(dtype))
     return track(out)
@@ -13346,7 +13351,7 @@ view_copy_size :: proc(self: Tensor, size: []i64) -> Tensor {
 }
 
 @private
-view_copy_dtype :: proc(self: Tensor, dtype: ScalarType) -> Tensor {
+view_copy_dtype :: proc(self: Tensor, dtype: ScalarType = .Float) -> Tensor {
     out: Tensor
     t.atg_view_copy_dtype(&out, self, i32(dtype))
     return track(out)
