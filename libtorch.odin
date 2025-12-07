@@ -1194,6 +1194,42 @@ i_clone :: proc(iv: IValue) -> IValue {
     return track(t.ati_clone(iv))
 }
 
+atan :: proc(self: Tensor) -> Tensor {
+    out: Tensor
+    t.atg_atan(&out, self)
+    return track(out)
+}
+
+atan2 :: proc(self: Tensor, other: Tensor) -> Tensor {
+    out: Tensor
+    t.atg_atan2(&out, self, other)
+    return track(out)
+}
+
+atan2_ :: proc(self: Tensor, other: Tensor) -> Tensor {
+    out: Tensor
+    t.atg_atan2_(&out, self, other)
+    return self
+}
+
+atan_ :: proc(self: Tensor) -> Tensor {
+    out: Tensor
+    t.atg_atan_(&out, self)
+    return self
+}
+
+atanh :: proc(self: Tensor) -> Tensor {
+    out: Tensor
+    t.atg_atanh(&out, self)
+    return track(out)
+}
+
+atanh_ :: proc(self: Tensor) -> Tensor {
+    out: Tensor
+    t.atg_atanh_(&out, self)
+    return self
+}
+
 // BITWISE AND (&)
 
 bitwise_and :: proc{
@@ -4932,6 +4968,37 @@ ge_tensor :: proc(self, other: Tensor) -> Tensor {
 ge_tensor_ :: proc(self, other: Tensor) -> Tensor {
     out: Tensor
     t.atg_ge_tensor_(&out, self, other)
+    return self
+}
+
+gt :: proc{gt_scalar, gt_tensor}
+gt_ :: proc{gt_scalar_, gt_tensor_}
+
+@private
+gt_scalar :: proc(self: Tensor, other: Scalar) -> Tensor {
+    out: Tensor
+    t.atg_gt(&out, self, other)
+    return track(out)
+}
+
+@private
+gt_scalar_ :: proc(self: Tensor, other: Scalar) -> Tensor {
+    out: Tensor
+    t.atg_gt_(&out, self, other)
+    return self
+}
+
+@private
+gt_tensor :: proc(self, other: Tensor) -> Tensor {
+    out: Tensor
+    t.atg_gt_tensor(&out, self, other)
+    return track(out)
+}
+
+@private
+gt_tensor_ :: proc(self, other: Tensor) -> Tensor {
+    out: Tensor
+    t.atg_gt_tensor_(&out, self, other)
     return self
 }
 
@@ -10305,7 +10372,7 @@ soft_margin_loss_backward_grad_input :: proc(grad_output, self, target: Tensor, 
 
 //  ACTIVATIONS
 
-softmax :: proc(self: Tensor, dim: i64, dtype: ScalarType) -> Tensor {
+softmax :: proc(self: Tensor, dim: i64, dtype: ScalarType = .Float) -> Tensor {
     out: Tensor
     t.atg_softmax(&out, self, dim, i32(dtype))
     return track(out)
